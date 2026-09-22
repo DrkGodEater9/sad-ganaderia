@@ -1,0 +1,29 @@
+# Node / Vite
+node_modules/
+dist/
+*.log
+/.env
+/.env.local
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Datos propios de cada finca -- nunca se suben (coordenadas reales,
+# credenciales, mediciones de campo). Ver backend/README.md.
+backend/.env
+backend/data/
+/potreros.geojson
+
+# Material de referencia que el dueno del proyecto deja localmente
+# (documentos, fotos, datos reales de su finca) -- no es parte del codigo.
+/resources/
+
+# Editor / SO
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,736 @@
+/* Sistema de diseño "Campo Claro" — ver DESIGN.md en la raíz del repo.
+   Mobile-first: se construye para ~360-400px de ancho y se adapta hacia
+   arriba. Sin modo oscuro: la app siempre se ve clara, a propósito, para
+   que se lea bien bajo sol directo en el potrero. */
+
+:root {
+  --color-fondo: #f4f7ef;
+  --color-fondo-alto: #eaf0e2;
+  --color-superficie: #ffffff;
+  --color-texto: #263129;
+  --color-texto-suave: #5b6b5e;
+  --color-borde: #d9e0d2;
+
+  --color-marca: #2c5f82;
+  --color-marca-oscuro: #1f4763;
+  --color-marca-tenue: #e4eef5;
+
+  --color-verde: #2f8f4e;
+  --color-verde-tenue: #e4f4e8;
+  --color-ambar: #c98a1f;
+  --color-ambar-tenue: #fbf0dd;
+  --color-rojo: #c1483c;
+  --color-rojo-tenue: #fbe7e4;
+  --color-neutro: #7c7f78;
+  --color-neutro-tenue: #eeefea;
+
+  --fuente: "Atkinson Hyperlegible", -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-fondo);
+  color: var(--color-texto);
+  font-family: var(--fuente);
+  font-size: 17px;
+  line-height: 1.5;
+  /* espacio para la barra de navegacion inferior, fija en toda la app */
+  padding-bottom: calc(84px + env(safe-area-inset-bottom));
+}
+
+h1,
+h2 {
+  margin: 0 0 4px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+h1 {
+  font-size: 24px;
+}
+
+h2 {
+  font-size: 18px;
+  margin-top: 4px;
+}
+
+p {
+  margin: 0 0 12px;
+}
+
+.texto-suave {
+  color: var(--color-texto-suave);
+}
+
+.subtitle {
+  color: var(--color-texto-suave);
+  font-size: 14px;
+  margin: 0 0 18px;
+  line-height: 1.5;
+}
+
+.hint {
+  font-size: 13px;
+  color: var(--color-texto-suave);
+  line-height: 1.5;
+  margin: 0 0 10px;
+}
+
+/* Vista "Dibujar potreros" */
+
+.wrap {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 3rem;
+}
+
+.card {
+  background: var(--color-superficie);
+  border: 1px solid var(--color-borde);
+  border-radius: 16px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.toolbar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+button {
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  min-height: 44px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--color-borde);
+  background: var(--color-fondo);
+  color: var(--color-texto);
+  cursor: pointer;
+}
+button:hover {
+  background: var(--color-superficie);
+}
+button.primary {
+  background: var(--color-marca);
+  color: #fff;
+  border-color: var(--color-marca);
+}
+button.primary:hover {
+  background: var(--color-marca-oscuro);
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+textarea {
+  width: 100%;
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid var(--color-borde);
+  background: var(--color-superficie);
+  color: var(--color-texto);
+  margin-bottom: 10px;
+  resize: vertical;
+}
+
+.svgwrap {
+  width: 100%;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--color-fondo-alto);
+  margin-bottom: 16px;
+}
+
+.card > .boton {
+  margin-top: 4px;
+}
+/* Solo el lienzo de dibujar potreros: los iconos SVG pequeños del resto
+   de la app (semaforo, flecha de tarjeta) no deben heredar esto. */
+.svgwrap svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+th,
+td {
+  text-align: left;
+  padding: 7px 6px;
+  border-bottom: 1px solid var(--color-borde);
+}
+th {
+  color: var(--color-texto-suave);
+  font-weight: 700;
+  font-size: 12px;
+}
+.swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+td button {
+  min-height: 36px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.confirmar-borrado {
+  display: inline-flex;
+  gap: 6px;
+}
+.empty {
+  color: var(--color-texto-suave);
+  font-size: 14px;
+  padding: 8px 0;
+}
+
+code {
+  background: var(--color-borde);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+/* Vistas "Mis potreros" y "Registrar medición" */
+
+.encabezado {
+  padding: 22px 18px 16px;
+  background: var(--color-fondo-alto);
+  border-bottom: 1px solid var(--color-borde);
+}
+
+.nota-modelo {
+  margin: 8px 0 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-marca-oscuro);
+}
+
+.contenido {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 18px 16px 12px;
+}
+
+/* Botones grandes (para dedos, luz de sol directa) */
+
+.boton {
+  font-family: inherit;
+  font-size: 17px;
+  font-weight: 700;
+  min-height: 56px;
+  padding: 12px 20px;
+  border-radius: 12px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.boton-ancho {
+  width: 100%;
+}
+
+.boton-primario {
+  background: var(--color-marca);
+  color: #ffffff;
+}
+
+.boton-primario:active {
+  background: var(--color-marca-oscuro);
+}
+
+.boton-primario:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.boton:active,
+.nav-boton:active {
+  transform: scale(0.97);
+}
+
+.boton,
+.nav-boton {
+  transition: transform 0.1s ease, background 0.15s ease;
+}
+
+.boton-secundario {
+  background: var(--color-superficie);
+  color: var(--color-marca);
+  border-color: var(--color-marca);
+}
+
+.boton-enlace {
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-marca);
+  background: none;
+  border: none;
+  text-decoration: underline;
+  padding: 6px 4px;
+  cursor: pointer;
+}
+
+/* Resumen */
+
+.resumen {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.chip-resumen {
+  flex: 1 1 80px;
+  border-radius: 14px;
+  padding: 12px 10px;
+  text-align: center;
+}
+
+.chip-numero {
+  display: block;
+  font-size: clamp(15px, 4vw, 26px);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: break-word;
+}
+
+.chip-etiqueta {
+  display: block;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.chip-verde {
+  background: var(--color-verde-tenue);
+  color: var(--color-verde);
+}
+
+.chip-ambar {
+  background: var(--color-ambar-tenue);
+  color: var(--color-ambar);
+}
+
+.chip-rojo {
+  background: var(--color-rojo-tenue);
+  color: var(--color-rojo);
+}
+
+.chip-neutro {
+  background: var(--color-neutro-tenue);
+  color: var(--color-neutro);
+}
+
+strong {
+  color: var(--color-texto);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Graficos de estadisticas del modelo (ver EstadisticasModelo.jsx).
+   Paleta de datos, separada de los tokens de marca/semaforo: aqui el
+   color identifica un algoritmo, no un estado del potrero. */
+
+.grafico {
+  margin: 12px 0 24px;
+}
+
+.grafico-leyenda {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 10px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-texto-suave);
+}
+
+.grafico-leyenda-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.grafico-leyenda-punto {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.insignia-ganador {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-verde);
+  background: var(--color-verde-tenue);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.grafico-fila {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.grafico-fila-etiquetada {
+  gap: 8px;
+}
+
+.grafico-etiqueta {
+  flex: 0 0 108px;
+  font-size: 12px;
+  color: var(--color-texto-suave);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grafico-pista {
+  flex: 1;
+  height: 20px;
+  background: var(--color-fondo-alto);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.grafico-relleno {
+  height: 100%;
+  min-width: 4px;
+  border-radius: 0 4px 4px 0;
+}
+
+.grafico-valor {
+  flex: 0 0 auto;
+  min-width: 64px;
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-texto);
+  text-align: right;
+}
+
+.grafico-pie {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-texto-suave);
+}
+
+/* Estado de "Actualizar recomendaciones" */
+
+.texto-estado {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  font-weight: 700;
+}
+
+.texto-estado-cargando {
+  background: var(--color-marca-tenue);
+  color: var(--color-marca-oscuro);
+}
+
+.texto-estado-ok {
+  background: var(--color-verde-tenue);
+  color: var(--color-verde);
+}
+
+.texto-estado-error {
+  background: var(--color-rojo-tenue);
+  color: var(--color-rojo);
+}
+
+.giro {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  margin-right: 8px;
+  vertical-align: -4px;
+  border: 3px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: girar 0.7s linear infinite;
+}
+
+@keyframes girar {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .giro {
+    animation: none;
+  }
+}
+
+.icono-estado {
+  vertical-align: -4px;
+  margin-right: 4px;
+}
+
+/* Tarjetas de potreros */
+
+.lista-potreros {
+  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tarjeta-potrero {
+  background: var(--color-superficie);
+  border: 2px solid var(--color-borde);
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+.tarjeta-verde {
+  border-color: var(--color-verde);
+}
+
+.tarjeta-ambar {
+  border-color: var(--color-ambar);
+}
+
+.tarjeta-rojo {
+  border-color: var(--color-rojo);
+}
+
+.tarjeta-sin_datos {
+  border-color: var(--color-neutro);
+}
+
+.tarjeta-cabecera {
+  width: 100%;
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.tarjeta-nombre {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--color-texto);
+}
+
+.insignia-aproximado {
+  display: inline-block;
+  margin-left: 8px;
+  vertical-align: middle;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--color-texto-suave);
+  border: 1.5px dashed var(--color-borde);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.aviso-aproximado {
+  font-size: 13px;
+  font-style: italic;
+  color: var(--color-texto-suave);
+}
+
+.tarjeta-chip {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  font-size: 14px;
+  font-weight: 700;
+  padding: 6px 12px;
+  border-radius: 999px;
+}
+
+.tarjeta-verde .tarjeta-chip {
+  background: var(--color-verde-tenue);
+  color: var(--color-verde);
+}
+
+.tarjeta-ambar .tarjeta-chip {
+  background: var(--color-ambar-tenue);
+  color: var(--color-ambar);
+}
+
+.tarjeta-rojo .tarjeta-chip {
+  background: var(--color-rojo-tenue);
+  color: var(--color-rojo);
+}
+
+.tarjeta-sin_datos .tarjeta-chip {
+  background: var(--color-neutro-tenue);
+  color: var(--color-neutro);
+}
+
+.tarjeta-detalle-interior {
+  padding: 0 16px 16px;
+  color: var(--color-texto-suave);
+}
+
+.tarjeta-detalle-interior p {
+  margin: 0 0 6px;
+}
+
+.tarjeta-detalle-interior strong {
+  color: var(--color-texto);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Formulario de registrar medición */
+
+form {
+  display: flex;
+  flex-direction: column;
+}
+
+label {
+  font-weight: 700;
+  margin: 14px 0 6px;
+}
+
+select,
+input[type="date"],
+input[type="number"],
+input[type="text"] {
+  font-family: inherit;
+  font-size: 18px;
+  min-height: 56px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 2px solid var(--color-borde);
+  background: var(--color-superficie);
+  color: var(--color-texto);
+  width: 100%;
+}
+
+select:focus,
+input:focus {
+  outline: 3px solid var(--color-marca-tenue);
+  border-color: var(--color-marca);
+}
+
+.toolbar input[type="text"] {
+  flex: 1 1 160px;
+  width: auto;
+  min-width: 140px;
+}
+
+.mensaje-formulario {
+  margin: 16px 0 4px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  font-weight: 700;
+}
+
+.mensaje-ok {
+  background: var(--color-verde-tenue);
+  color: var(--color-verde);
+}
+
+.mensaje-error {
+  background: var(--color-rojo-tenue);
+  color: var(--color-rojo);
+}
+
+.mensaje-cargando {
+  background: var(--color-marca-tenue);
+  color: var(--color-marca-oscuro);
+}
+
+form .boton {
+  margin-top: 10px;
+}
+
+/* Navegación entre las tres vistas de la app (fija abajo) */
+
+.nav-inferior {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  background: var(--color-superficie);
+  border-top: 1px solid var(--color-borde);
+  padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
+  gap: 8px;
+  z-index: 10;
+}
+
+.nav-boton {
+  flex: 1;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+  font-weight: 700;
+  min-height: 56px;
+  padding: 4px 2px;
+  border-radius: 12px;
+  border: 2px solid transparent;
+  background: none;
+  color: var(--color-texto-suave);
+  cursor: pointer;
+}
+
+.nav-boton-activo {
+  background: var(--color-marca-tenue);
+  color: var(--color-marca-oscuro);
+  border-color: var(--color-marca);
+}
+
+/* Pantallas más anchas que un celular */
+
+@media (min-width: 700px) {
+  body {
+    font-size: 18px;
+  }
+
+  .encabezado {
+    padding: 32px 24px 22px;
+  }
+
+  .contenido {
+    padding: 28px 24px 24px;
+  }
+
+  .lista-potreros {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .nav-inferior {
+    max-width: 720px;
+    margin: 0 auto;
+    left: 0;
+    right: 0;
+    border-radius: 16px 16px 0 0;
+  }
+}

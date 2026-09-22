@@ -1,0 +1,7 @@
+# Dependencias del script de modelo (entrenar_predecir.py).
+# Instalar con:  pip install -r requirements.txt
+pandas>=2.0
+numpy>=1.24
+scikit-learn>=1.3
+joblib>=1.3
+openpyxl>=3.1
