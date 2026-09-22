@@ -35,8 +35,8 @@ coordenadas, o de Google Earth).
 
 ```bash
 # 1. Clona el repositorio (o entra a la carpeta si ya lo tienes)
-git clone https://github.com/DrkGodEater9/potrero-mapper.git
-cd potrero-mapper
+git clone https://github.com/DrkGodEater9/sad-ganaderia.git
+cd sad-ganaderia
 
 # 2. Instala las dependencias (solo la primera vez)
 npm install
@@ -72,7 +72,7 @@ claro pidiendo reintentar en vez de fallar en silencio.
 ## Estructura del proyecto
 
 ```
-potrero-mapper/
+sad-ganaderia/
 ├── index.html
 ├── package.json
 ├── vite.config.js

@@ -17,7 +17,7 @@ const PALETTE = ["#2e7d32", "#c99b4a", "#1565c0", "#ad1457", "#00838f", "#6a1b9a
 // El dibujo en curso se guarda en el navegador para no perderlo si se
 // recarga la página sin querer -- se borra al usarlo en la app, al
 // exportarlo, o al darle a "Cambiar de finca".
-const CLAVE_GUARDADO = "potrero-mapper:dibujo-en-curso";
+const CLAVE_GUARDADO = "sad-ganaderia:dibujo-en-curso";
 
 function cargarDibujoGuardado() {
   try {

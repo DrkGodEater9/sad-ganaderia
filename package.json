@@ -1,7 +1,7 @@
 {
-  "name": "potrero-mapper",
+  "name": "sad-ganaderia",
   "version": "1.0.0",
-  "description": "Herramienta para dibujar y exportar polígonos de potreros sobre el contorno real de cualquier finca.",
+  "description": "Sistema de Apoyo a Decisiones para fincas ganaderas: dibuja potreros, calcula su estado con indices de satelite y un modelo de biomasa, y registra aforo de campo.",
   "type": "module",
   "scripts": {
     "dev": "vite",
