@@ -1,17 +1,35 @@
 import { useEffect, useState } from "react";
-import { obtenerPotreros, registrarAforo } from "../utils/api.js";
+import {
+  obtenerPotreros,
+  registrarAforo,
+  obtenerHistorialAforo,
+  editarAforo,
+  borrarAforo,
+} from "../utils/api.js";
+import { formatearFecha } from "../utils/formato.js";
+
+function hoyISO() {
+  return new Date().toISOString().slice(0, 10);
+}
 
 export default function RegistrarMedicion() {
   const [potreros, setPotreros] = useState([]);
   const [cargandoPotreros, setCargandoPotreros] = useState(true);
   const [errorPotreros, setErrorPotreros] = useState(null);
+
   const [potrero, setPotrero] = useState("");
-  const [fecha, setFecha] = useState(() => new Date().toISOString().slice(0, 10));
+  const [fecha, setFecha] = useState(hoyISO);
   const [altura1, setAltura1] = useState("");
   const [altura2, setAltura2] = useState("");
   const [altura3, setAltura3] = useState("");
   const [mensaje, setMensaje] = useState(null); // { tipo: "ok"|"error"|"cargando", texto }
   const [guardando, setGuardando] = useState(false);
+  const [editandoId, setEditandoId] = useState(null);
+
+  const [historial, setHistorial] = useState(null); // null mientras carga
+  const [errorHistorial, setErrorHistorial] = useState(null);
+  const [confirmandoBorrado, setConfirmandoBorrado] = useState(null);
+  const [borrandoId, setBorrandoId] = useState(null);
 
   function cargarPotreros() {
     setCargandoPotreros(true);
@@ -20,6 +38,13 @@ export default function RegistrarMedicion() {
       .then((datos) => setPotreros(datos.potreros || []))
       .catch((err) => setErrorPotreros(err.message))
       .finally(() => setCargandoPotreros(false));
+  }
+
+  function cargarHistorial() {
+    setErrorHistorial(null);
+    obtenerHistorialAforo()
+      .then((datos) => setHistorial(datos.aforo || []))
+      .catch((err) => setErrorHistorial(err.message));
   }
 
   useEffect(() => {
@@ -38,6 +63,39 @@ export default function RegistrarMedicion() {
       activo = false;
     };
   }, []);
+
+  useEffect(() => {
+    let activo = true;
+    obtenerHistorialAforo()
+      .then((datos) => {
+        if (activo) setHistorial(datos.aforo || []);
+      })
+      .catch((err) => {
+        if (activo) setErrorHistorial(err.message);
+      });
+    return () => {
+      activo = false;
+    };
+  }, []);
+
+  function limpiarFormulario() {
+    setEditandoId(null);
+    setPotrero("");
+    setFecha(hoyISO());
+    setAltura1("");
+    setAltura2("");
+    setAltura3("");
+  }
+
+  function iniciarEdicion(registro) {
+    setMensaje(null);
+    setEditandoId(registro.id);
+    setPotrero(registro.potrero || "");
+    setFecha(registro.fecha || hoyISO());
+    setAltura1(registro.altura_cm_1 != null ? String(registro.altura_cm_1) : "");
+    setAltura2(registro.altura_cm_2 != null ? String(registro.altura_cm_2) : "");
+    setAltura3(registro.altura_cm_3 != null ? String(registro.altura_cm_3) : "");
+  }
 
   async function guardar(evento) {
     evento.preventDefault();
@@ -61,19 +119,28 @@ export default function RegistrarMedicion() {
     }
 
     setGuardando(true);
-    setMensaje({ tipo: "cargando", texto: "Guardando…" });
+    setMensaje({ tipo: "cargando", texto: editandoId ? "Guardando cambios…" : "Guardando…" });
     try {
-      await registrarAforo(potrero, {
-        altura_cm_1: parseFloat(altura1),
-        altura_cm_2: parseFloat(altura2),
-        altura_cm_3: parseFloat(altura3),
-        fecha: fecha || undefined,
-      });
-      setMensaje({ tipo: "ok", texto: "Medición guardada. Ya puedes registrar el siguiente potrero." });
-      setAltura1("");
-      setAltura2("");
-      setAltura3("");
-      setPotrero("");
+      if (editandoId) {
+        await editarAforo(editandoId, {
+          potrero,
+          fecha,
+          altura_cm_1: parseFloat(altura1),
+          altura_cm_2: parseFloat(altura2),
+          altura_cm_3: parseFloat(altura3),
+        });
+        setMensaje({ tipo: "ok", texto: "Medición actualizada." });
+      } else {
+        await registrarAforo(potrero, {
+          altura_cm_1: parseFloat(altura1),
+          altura_cm_2: parseFloat(altura2),
+          altura_cm_3: parseFloat(altura3),
+          fecha: fecha || undefined,
+        });
+        setMensaje({ tipo: "ok", texto: "Medición guardada. Ya puedes registrar el siguiente potrero." });
+      }
+      limpiarFormulario();
+      cargarHistorial();
     } catch (err) {
       setMensaje({ tipo: "error", texto: `No se pudo guardar: ${err.message}` });
     } finally {
@@ -81,11 +148,27 @@ export default function RegistrarMedicion() {
     }
   }
 
+  async function confirmarBorrado(id) {
+    setConfirmandoBorrado(null);
+    setBorrandoId(id);
+    try {
+      await borrarAforo(id);
+      setHistorial((actual) => (actual || []).filter((registro) => registro.id !== id));
+      if (editandoId === id) limpiarFormulario();
+    } catch (err) {
+      setErrorHistorial(`No se pudo borrar la medición: ${err.message}`);
+    } finally {
+      setBorrandoId(null);
+    }
+  }
+
   return (
     <div className="contenido">
-      <h2>Registrar medición</h2>
+      <h2>{editandoId ? "Editar medición" : "Registrar medición"}</h2>
       <p className="texto-suave">
-        Elige el potrero y anota las tres medidas de altura del pasto que tomaste en el campo.
+        {editandoId
+          ? "Corrige los datos de esta medición y guarda los cambios."
+          : "Elige el potrero y anota las tres medidas de altura del pasto que tomaste en el campo."}
       </p>
 
       {errorPotreros && (
@@ -178,9 +261,85 @@ export default function RegistrarMedicion() {
         )}
 
         <button type="submit" className="boton boton-primario boton-ancho" disabled={guardando}>
-          Guardar medición
+          {editandoId ? "Guardar cambios" : "Guardar medición"}
         </button>
+        {editandoId && (
+          <button
+            type="button"
+            className="boton boton-secundario boton-ancho"
+            onClick={limpiarFormulario}
+            disabled={guardando}
+          >
+            Cancelar edición
+          </button>
+        )}
       </form>
+
+      <section className="historial-aforo">
+        <h3>Historial de mediciones</h3>
+
+        {errorHistorial && (
+          <>
+            <p className="texto-estado texto-estado-error">
+              No se pudo cargar el historial: {errorHistorial}
+            </p>
+            <button type="button" className="boton boton-secundario boton-ancho" onClick={cargarHistorial}>
+              Reintentar
+            </button>
+          </>
+        )}
+
+        {historial === null && !errorHistorial && <p className="texto-suave">Cargando historial…</p>}
+
+        {historial !== null && historial.length === 0 && !errorHistorial && (
+          <p className="texto-suave">Todavía no has registrado ninguna medición.</p>
+        )}
+
+        <div className="lista-historial">
+          {(historial || []).map((registro) => (
+            <article key={registro.id} className="tarjeta-aforo">
+              <div className="tarjeta-aforo-info">
+                <span className="tarjeta-aforo-potrero">{registro.potrero}</span>
+                <span className="tarjeta-aforo-fecha">{formatearFecha(registro.fecha)}</span>
+                <span className="tarjeta-aforo-alturas">
+                  {registro.altura_cm_1} / {registro.altura_cm_2} / {registro.altura_cm_3} cm
+                </span>
+              </div>
+              <div className="tarjeta-aforo-acciones">
+                {confirmandoBorrado === registro.id ? (
+                  <span className="confirmar-borrado">
+                    <button type="button" className="boton-enlace" onClick={() => confirmarBorrado(registro.id)}>
+                      Sí, borrar
+                    </button>
+                    <button type="button" className="boton-enlace" onClick={() => setConfirmandoBorrado(null)}>
+                      Cancelar
+                    </button>
+                  </span>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className="boton-enlace"
+                      onClick={() => iniciarEdicion(registro)}
+                      disabled={borrandoId === registro.id}
+                    >
+                      Editar
+                    </button>
+                    <button
+                      type="button"
+                      className="boton-enlace boton-enlace-peligro"
+                      onClick={() => setConfirmandoBorrado(registro.id)}
+                      disabled={borrandoId === registro.id}
+                    >
+                      {borrandoId === registro.id ? "Borrando…" : "Eliminar"}
+                    </button>
+                  </>
+                )}
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
     </div>
   );
 }

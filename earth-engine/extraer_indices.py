@@ -29,6 +29,16 @@ except ImportError:
 INDICES = ["NDVI", "GNDVI", "NDRE", "SAVI", "EVI"]
 CLASES_SCL_VALIDAS = [4, 5, 7]  # 4=vegetacion, 5=suelo desnudo, 7=no vegetado/cobertura baja
 
+# Factor de escala de COPERNICUS/S2_SR_HARMONIZED: la reflectancia viene como
+# entero multiplicado por 10000. Ver enmascarar_y_calcular_indices().
+ESCALA_REFLECTANCIA = 10000
+
+# Cuantas escenas de la ventana se pueden llegar a probar buscando uno que
+# deje indices utilizables en los potreros. Cada intento es una consulta mas
+# a Earth Engine, asi que se corta en un numero razonable en vez de recorrer
+# toda la ventana.
+MAX_ESCENAS_CANDIDATAS = 25
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -123,6 +133,7 @@ def cargar_potreros(ruta_geojson):
         sys.exit(1)
 
     features_ee = []
+    nombres = []
     for i, feature in enumerate(features):
         propiedades = feature.get("properties") or {}
         nombre = propiedades.get("nombre") or feature.get("nombre")
@@ -136,15 +147,25 @@ def cargar_potreros(ruta_geojson):
             continue
 
         features_ee.append(ee.Feature(ee.Geometry(geometria), {"potrero": nombre}))
+        nombres.append(nombre)
 
     if not features_ee:
         print("Error: no se pudo construir ningun potrero valido a partir del GeoJSON.")
         sys.exit(1)
 
-    return ee.FeatureCollection(features_ee)
+    return ee.FeatureCollection(features_ee), nombres
 
 
-def buscar_mejor_escena(area_total, fecha_objetivo, ventana_dias, umbral_nubes):
+def buscar_escenas_candidatas(area_total, fecha_objetivo, ventana_dias, umbral_nubes, limite=MAX_ESCENAS_CANDIDATAS):
+    """Devuelve las escenas de la ventana que pasan el filtro de nubes,
+    ordenadas de la mas cercana a la mas lejana respecto a --fecha.
+
+    Devuelve varias y no solo la mejor a proposito: CLOUDY_PIXEL_PERCENTAGE
+    es el porcentaje de nubes del TILE completo de Sentinel-2 (110 x 110 km),
+    asi que una escena puede pasar el filtro y aun asi tener justo los
+    potreros tapados por una nube o su sombra. En ese caso hay que poder
+    seguir con la siguiente escena mas cercana en vez de quedarse sin dato.
+    """
     inicio = fecha_objetivo - timedelta(days=ventana_dias)
     fin = fecha_objetivo + timedelta(days=ventana_dias + 1)  # +1 para incluir el ultimo dia de la ventana
 
@@ -162,6 +183,7 @@ def buscar_mejor_escena(area_total, fecha_objetivo, ventana_dias, umbral_nubes):
         .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", umbral_nubes))
         .map(con_diferencia_de_dias)
         .sort("dias_diferencia")
+        .limit(limite)
     )
 
     try:
@@ -184,15 +206,77 @@ def buscar_mejor_escena(area_total, fecha_objetivo, ventana_dias, umbral_nubes):
         )
         sys.exit(1)
 
-    imagen = ee.Image(coleccion.first())
-    propiedades = imagen.toDictionary(["system:time_start", "CLOUDY_PIXEL_PERCENTAGE", "dias_diferencia", "system:index"]).getInfo()
+    lista = coleccion.toList(cantidad)
+    candidatas = []
+    for indice in range(cantidad):
+        imagen = ee.Image(lista.get(indice))
+        try:
+            propiedades = imagen.toDictionary(
+                ["system:time_start", "CLOUDY_PIXEL_PERCENTAGE", "dias_diferencia", "system:index"]
+            ).getInfo()
+        except Exception as error:
+            print(f"Aviso: no se pudieron leer los metadatos de una escena, se omite. Detalle: {error}")
+            continue
 
-    fecha_escena = datetime.utcfromtimestamp(propiedades["system:time_start"] / 1000).date()
-    dias_diferencia = round(propiedades["dias_diferencia"])
-    nubes = propiedades.get("CLOUDY_PIXEL_PERCENTAGE")
-    id_escena = propiedades.get("system:index")
+        candidatas.append(
+            {
+                "imagen": imagen,
+                "fecha_escena": datetime.utcfromtimestamp(propiedades["system:time_start"] / 1000).date(),
+                "dias_diferencia": round(propiedades["dias_diferencia"]),
+                "nubes": propiedades.get("CLOUDY_PIXEL_PERCENTAGE"),
+                "id_escena": propiedades.get("system:index"),
+            }
+        )
 
-    return imagen, fecha_escena, dias_diferencia, nubes, id_escena
+    return candidatas
+
+
+def recolectar_indices_por_potrero(potreros, nombres_potreros, candidatas):
+    """Recorre las escenas candidatas de la mas cercana a la mas lejana y se
+    queda, para CADA potrero, con la primera que le dio indices utilizables.
+
+    Potreros distintos pueden terminar con escenas de fechas distintas: es
+    preferible un dato real de hace unos dias que ningun dato porque justo
+    ese dia habia una nube encima."""
+    pendientes = set(nombres_potreros)
+    resultados = {}
+
+    for candidata in candidatas:
+        if not pendientes:
+            break
+
+        imagen_indices = enmascarar_y_calcular_indices(candidata["imagen"])
+        features = calcular_estadisticas_por_potrero(imagen_indices, potreros)
+
+        for feature in features:
+            propiedades = feature["properties"]
+            nombre = propiedades.get("potrero")
+            if nombre not in pendientes:
+                continue
+            # Sin NDVI ni SAVI la fila no le sirve al modelo: ese potrero
+            # quedo enmascarado (nube o sombra encima) en esta escena.
+            if propiedades.get("NDVI_mean") is None and propiedades.get("SAVI_mean") is None:
+                continue
+
+            fila = {
+                "fecha_escena_usada": candidata["fecha_escena"].isoformat(),
+                "dias_diferencia_con_fecha_objetivo": candidata["dias_diferencia"],
+                "id_escena": candidata["id_escena"],
+                "nubes_escena": candidata["nubes"],
+            }
+            for indice in INDICES:
+                fila[f"{indice}_mean"] = propiedades.get(f"{indice}_mean")
+                fila[f"{indice}_stdDev"] = propiedades.get(f"{indice}_stdDev")
+            resultados[nombre] = fila
+            pendientes.discard(nombre)
+
+        if pendientes:
+            print(
+                f"Aviso: la escena del {candidata['fecha_escena'].isoformat()} no dejo indices utilizables "
+                f"para {len(pendientes)} potrero(s) (nube o sombra encima); se probara con la siguiente."
+            )
+
+    return resultados, pendientes
 
 
 def enmascarar_y_calcular_indices(imagen):
@@ -202,19 +286,32 @@ def enmascarar_y_calcular_indices(imagen):
         mascara_valida = mascara_valida.Or(scl.eq(clase))
     imagen = imagen.updateMask(mascara_valida)
 
-    ndvi = imagen.normalizedDifference(["B8", "B4"]).rename("NDVI")
-    gndvi = imagen.normalizedDifference(["B8", "B3"]).rename("GNDVI")
-    ndre = imagen.normalizedDifference(["B8", "B5"]).rename("NDRE")
+    # S2_SR_HARMONIZED entrega la reflectancia como entero escalado x10000
+    # (valores tipicos 1000-4000), no en [0, 1]. NDVI, GNDVI y NDRE son
+    # cocientes y no se ven afectados, pero SAVI y EVI tienen constantes
+    # ADITIVAS (el L=0.5 de SAVI y el +1 de EVI) que solo significan algo con
+    # reflectancia en [0, 1]: frente a valores de orden 1e3 quedan anuladas y
+    # SAVI degenera en exactamente 1.5*NDVI mientras EVI se satura en su tope.
+    # Por eso hay que dividir ANTES de evaluar las expresiones.
+    reflectancia = imagen.divide(ESCALA_REFLECTANCIA)
 
-    savi = imagen.expression(
+    ndvi = reflectancia.normalizedDifference(["B8", "B4"]).rename("NDVI")
+    gndvi = reflectancia.normalizedDifference(["B8", "B3"]).rename("GNDVI")
+    ndre = reflectancia.normalizedDifference(["B8", "B5"]).rename("NDRE")
+
+    savi = reflectancia.expression(
         "((NIR - RED) / (NIR + RED + 0.5)) * 1.5",
-        {"NIR": imagen.select("B8"), "RED": imagen.select("B4")},
+        {"NIR": reflectancia.select("B8"), "RED": reflectancia.select("B4")},
     ).rename("SAVI")
 
     evi = (
-        imagen.expression(
+        reflectancia.expression(
             "2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))",
-            {"NIR": imagen.select("B8"), "RED": imagen.select("B4"), "BLUE": imagen.select("B2")},
+            {
+                "NIR": reflectancia.select("B8"),
+                "RED": reflectancia.select("B4"),
+                "BLUE": reflectancia.select("B2"),
+            },
         )
         .clamp(-1, 1)
         .rename("EVI")
@@ -234,22 +331,31 @@ def calcular_estadisticas_por_potrero(imagen_indices, potreros):
     return features
 
 
-def construir_dataframe(features, fecha_escena, dias_diferencia):
+def construir_dataframe(nombres_potreros, resultados, candidata_mas_cercana):
+    """Una fila por potrero, siempre -- los que no consiguieron indices en
+    ninguna escena quedan con la fecha de la escena mas cercana y los indices
+    vacios (el modelo los interpreta como 'sin_datos')."""
     columnas = ["potrero", "fecha_escena_usada", "dias_diferencia_con_fecha_objetivo"]
     for indice in INDICES:
         columnas += [f"{indice}_mean", f"{indice}_stdDev"]
 
     filas = []
-    for feature in features:
-        propiedades = feature["properties"]
+    for nombre in nombres_potreros:
+        resultado = resultados.get(nombre)
+        if resultado is None:
+            resultado = {
+                "fecha_escena_usada": candidata_mas_cercana["fecha_escena"].isoformat(),
+                "dias_diferencia_con_fecha_objetivo": candidata_mas_cercana["dias_diferencia"],
+            }
+
         fila = {
-            "potrero": propiedades.get("potrero"),
-            "fecha_escena_usada": fecha_escena.isoformat(),
-            "dias_diferencia_con_fecha_objetivo": dias_diferencia,
+            "potrero": nombre,
+            "fecha_escena_usada": resultado["fecha_escena_usada"],
+            "dias_diferencia_con_fecha_objetivo": resultado["dias_diferencia_con_fecha_objetivo"],
         }
         for indice in INDICES:
-            fila[f"{indice}_mean"] = propiedades.get(f"{indice}_mean")
-            fila[f"{indice}_stdDev"] = propiedades.get(f"{indice}_stdDev")
+            fila[f"{indice}_mean"] = resultado.get(f"{indice}_mean")
+            fila[f"{indice}_stdDev"] = resultado.get(f"{indice}_stdDev")
         filas.append(fila)
 
     return pd.DataFrame(filas, columns=columnas)
@@ -273,26 +379,37 @@ def main():
 
     inicializar_earth_engine(args.proyecto)
 
-    potreros = cargar_potreros(args.geojson)
-    cantidad_potreros = potreros.size().getInfo()
+    potreros, nombres_potreros = cargar_potreros(args.geojson)
 
-    imagen, fecha_escena, dias_diferencia, nubes, id_escena = buscar_mejor_escena(
+    candidatas = buscar_escenas_candidatas(
         potreros.geometry(), fecha_objetivo, args.ventana_dias, args.umbral_nubes
     )
+    resultados, pendientes = recolectar_indices_por_potrero(potreros, nombres_potreros, candidatas)
 
-    imagen_indices = enmascarar_y_calcular_indices(imagen)
-    features = calcular_estadisticas_por_potrero(imagen_indices, potreros)
-    df = construir_dataframe(features, fecha_escena, dias_diferencia)
+    if not resultados:
+        print(
+            f"\nNo se consiguieron indices utilizables para ningun potrero: las {len(candidatas)} escena(s) "
+            f"de la ventana (+/- {args.ventana_dias} dias, nubes < {args.umbral_nubes}%) tienen los potreros "
+            "tapados por nubes o sus sombras.\n\n"
+            "Sugerencia: aumenta --ventana-dias para buscar en un rango de fechas mas amplio."
+        )
+        sys.exit(1)
+
+    df = construir_dataframe(nombres_potreros, resultados, candidatas[0])
 
     if str(args.salida).lower().endswith(".xlsx"):
         df.to_excel(args.salida, index=False)
     else:
         df.to_csv(args.salida, index=False)
 
+    fechas_usadas = sorted({fila["fecha_escena_usada"] for fila in resultados.values()})
+
     print("\nListo.")
-    print(f"Potreros procesados: {cantidad_potreros}")
-    print(f"Escena Sentinel-2 usada: {id_escena} (fecha real: {fecha_escena.isoformat()}, nubes: {nubes:.1f}%)")
-    print(f"Diferencia con la fecha objetivo ({fecha_objetivo.isoformat()}): {dias_diferencia} dia(s)")
+    print(f"Potreros procesados: {len(nombres_potreros)}")
+    print(f"Potreros con indices utilizables: {len(resultados)}")
+    if pendientes:
+        print(f"Potreros sin dato (nubes en todas las escenas probadas): {', '.join(sorted(pendientes))}")
+    print(f"Escenas Sentinel-2 usadas: {', '.join(fechas_usadas)} (fecha objetivo: {fecha_objetivo.isoformat()})")
     print(f"Archivo generado en: {os.path.abspath(args.salida)}")
 
 

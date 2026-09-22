@@ -57,9 +57,13 @@ FORMULA_BASE = 100.0
 FORMULA_K = 2.5
 FORMULA_BIOMASA_MAXIMA = 4000.0  # tope de cordura: nada de valores absurdos
 
-# Si falta NDVI en la escena pero hay SAVI, se aproxima NDVI a partir de
-# SAVI (en estos pastos SAVI ~ NDVI / 1.8, ver datos de ejemplo de la finca).
-SAVI_A_NDVI = 1.8
+# Si falta NDVI en la escena pero hay SAVI, se aproxima NDVI a partir de SAVI.
+# El valor es el cociente NDVI/SAVI medido sobre las 80 filas del historial de
+# esta finca (rango 1.34-2.13, media 1.69). Es una aproximacion local, no una
+# constante universal: depende del nivel de reflectancia del pasto.
+# En la practica es un camino poco frecuente: NDVI y SAVI salen de la misma
+# imagen enmascarada, asi que casi siempre se anulan juntos.
+SAVI_A_NDVI = 1.69
 
 # Hiperparametros conservadores a proposito: el dataset de aforo va a ser
 # diminuto (el minimo del contrato son 8 muestras), asi que un bosque
@@ -150,6 +154,16 @@ def parse_args():
         type=int,
         default=15,
         help="Dias maximos de diferencia entre la fecha del aforo y la de la escena satelital (default: 15).",
+    )
+    parser.add_argument(
+        "--variables",
+        default=None,
+        help=(
+            "Lista separada por comas de las variables de entrada a usar (por ejemplo "
+            "'NDVI_mean,NDVI_stdDev,precip_30d_mm'). Por defecto se usan las 12 (10 indices "
+            "+ 2 de clima). Con pocas muestras conviene reducirlas: con menos puntos que "
+            "variables el modelo sobreajusta y el R2 se vuelve negativo."
+        ),
     )
     parser.add_argument(
         "--modo",
@@ -420,27 +434,65 @@ def emparejar_aforo_con_indices(aforo, indices, ventana_dias, clima):
     return pd.DataFrame(filas)
 
 
-def columnas_de_entrada(usar_clima):
-    return COLUMNAS_INDICES + (COLUMNAS_CLIMA if usar_clima else [])
+def columnas_de_entrada(usar_clima, seleccion=None):
+    disponibles = COLUMNAS_INDICES + (COLUMNAS_CLIMA if usar_clima else [])
+    if not seleccion:
+        return disponibles
+
+    pedidas = [c.strip() for c in seleccion.split(",") if c.strip()]
+    desconocidas = [c for c in pedidas if c not in COLUMNAS_INDICES + COLUMNAS_CLIMA]
+    if desconocidas:
+        print(
+            f"Error: --variables incluye nombres que no existen: {', '.join(desconocidas)}.\n"
+            f"Validas: {', '.join(COLUMNAS_INDICES + COLUMNAS_CLIMA)}"
+        )
+        sys.exit(1)
+
+    elegidas = [c for c in pedidas if c in disponibles]
+    ignoradas = [c for c in pedidas if c not in disponibles]
+    if ignoradas:
+        print(f"Aviso: se ignoran {', '.join(ignoradas)} porque se corrio sin --clima.")
+    if not elegidas:
+        print("Error: --variables no dejo ninguna variable utilizable.")
+        sys.exit(1)
+    return elegidas
 
 
 def validar_cruzado(modelo, X, y, k):
-    """Valida con k-fold y calcula RMSE/R2 sobre las predicciones fuera de
-    pliegue juntas (con pliegues de 2-3 muestras, un R2 por pliegue no
-    significa nada; agrupadas si)."""
+    """Valida con k-fold y calcula las metricas sobre las predicciones fuera
+    de pliegue juntas (con pliegues de 2-3 muestras, un R2 por pliegue no
+    significa nada; agrupadas si).
+
+    Devuelve (metricas, predicciones_fuera_de_pliegue). Ademas de RMSE y R2
+    se reportan MAE, sesgo y nRMSE porque son los que pide la literatura de
+    estimacion de biomasa por sensores remotos: el RMSE solo no distingue
+    entre un modelo que se equivoca parejo y uno que subestima siempre."""
     predicciones = np.zeros(len(y), dtype=float)
     for indices_entrenamiento, indices_prueba in KFold(n_splits=k, shuffle=True, random_state=42).split(X):
         modelo.fit(X[indices_entrenamiento], y[indices_entrenamiento])
         predicciones[indices_prueba] = modelo.predict(X[indices_prueba])
+
+    residuos = predicciones - y
+    media_observada = float(np.mean(y))
     rmse = float(np.sqrt(mean_squared_error(y, predicciones)))
-    r2 = float(r2_score(y, predicciones))
-    return rmse, r2
+
+    metricas = {
+        "rmse": rmse,
+        "r2": float(r2_score(y, predicciones)),
+        "mae": float(np.mean(np.abs(residuos))),
+        # Sesgo (error medio): positivo = el modelo sobreestima en promedio.
+        "sesgo": float(np.mean(residuos)),
+        # RMSE como % de la biomasa media observada: permite comparar contra
+        # estudios de otras fincas/pastos, donde la escala de kg/ha cambia.
+        "nrmse_pct": float(rmse / media_observada * 100) if media_observada else None,
+    }
+    return metricas, predicciones
 
 
-def entrenar_modelo(emparejados, usar_clima, minimo_muestras):
+def entrenar_modelo(emparejados, usar_clima, minimo_muestras, seleccion_variables=None):
     """Compara Random Forest contra regresion lineal y devuelve el paquete
     del ganador (o None si no hay con que entrenar)."""
-    columnas = columnas_de_entrada(usar_clima)
+    columnas = columnas_de_entrada(usar_clima, seleccion_variables)
     datos = emparejados.dropna(subset=["biomasa_kg_ms_ha"]).copy()
 
     # Columnas que estan completamente vacias no aportan y romperian la
@@ -465,13 +517,17 @@ def entrenar_modelo(emparejados, usar_clima, minimo_muestras):
         "regresion_lineal": LinearRegression(),
     }
     metricas = {}
+    predicciones_por_algoritmo = {}
     for nombre, modelo in candidatos.items():
-        rmse, r2 = validar_cruzado(modelo, X, y, k)
-        metricas[nombre] = (rmse, r2)
-        print(f"  {nombre}: RMSE = {rmse:.1f} kg MS/ha, R2 = {r2:.3f} (k-fold con k={k})")
+        metricas[nombre], predicciones_por_algoritmo[nombre] = validar_cruzado(modelo, X, y, k)
+        m = metricas[nombre]
+        print(
+            f"  {nombre}: RMSE = {m['rmse']:.1f} kg MS/ha, R2 = {m['r2']:.3f}, "
+            f"MAE = {m['mae']:.1f}, sesgo = {m['sesgo']:+.1f} (k-fold con k={k})"
+        )
 
-    ganador = min(metricas, key=lambda nombre: metricas[nombre][0])
-    rmse, r2 = metricas[ganador]
+    ganador = min(metricas, key=lambda nombre: metricas[nombre]["rmse"])
+    metricas_ganador = metricas[ganador]
 
     modelo_final = candidatos[ganador]
     modelo_final.fit(X, y)
@@ -493,21 +549,52 @@ def entrenar_modelo(emparejados, usar_clima, minimo_muestras):
         reverse=True,
     )
 
+    # Observado vs predicho fuera de pliegue, punto por punto: es la tabla
+    # con la que se arma el grafico de dispersion y la que permite ver si el
+    # error se concentra en los potreros con mas (o menos) pasto.
+    def etiqueta(columna, i):
+        if columna not in datos.columns:
+            return None
+        valor = datos.iloc[i][columna]
+        return valor.isoformat() if hasattr(valor, "isoformat") else str(valor)
+
+    observado_vs_predicho = [
+        {
+            "potrero": etiqueta("potrero", i),
+            "fecha_aforo": etiqueta("fecha_aforo", i),
+            "observado": float(y[i]),
+            "predicho": float(predicciones_por_algoritmo[ganador][i]),
+            "residuo": float(predicciones_por_algoritmo[ganador][i] - y[i]),
+        }
+        for i in range(len(y))
+    ]
+
     return {
         "modelo": modelo_final,
         "algoritmo": ganador,
         "columnas": columnas,
         "medianas": medianas,
-        "rmse": rmse,
-        "r2": r2,
+        "rmse": metricas_ganador["rmse"],
+        "r2": metricas_ganador["r2"],
+        "mae": metricas_ganador["mae"],
+        "sesgo": metricas_ganador["sesgo"],
+        "nrmse_pct": metricas_ganador["nrmse_pct"],
         "n_muestras_entrenamiento": int(len(y)),
+        "n_variables_entrada": len(columnas),
         "entrenado_el": datetime.now().replace(microsecond=0).isoformat(sep=" "),
         "usa_clima": bool(usar_clima and any(c in columnas for c in COLUMNAS_CLIMA)),
         "k_validacion": k,
+        # Descriptivas de la muestra de entrenamiento: sin saber el rango y la
+        # dispersion de la biomasa medida, un RMSE en kg/ha no se puede leer.
+        "biomasa_media": float(np.mean(y)),
+        "biomasa_desv": float(np.std(y, ddof=1)) if len(y) > 1 else 0.0,
+        "biomasa_min": float(np.min(y)),
+        "biomasa_max": float(np.max(y)),
         # Metricas de AMBOS algoritmos (no solo el ganador), para poder
         # mostrar la comparacion completa en la app.
-        "metricas_comparacion": {nombre: {"rmse": m[0], "r2": m[1]} for nombre, m in metricas.items()},
+        "metricas_comparacion": metricas,
         "importancias": importancias,
+        "observado_vs_predicho": observado_vs_predicho,
         # Huella del aforo usado, para que el modo auto sepa si hay algo nuevo.
         "n_filas_aforo": None,
         "ultima_fecha_aforo": None,
@@ -557,9 +644,11 @@ def predecir_potreros(nombres, indices, paquete, clima, args):
             conteo["sin_datos"] += 1
             continue
 
-        # El historial ya viene ordenado por fecha de escena: la ultima fila
-        # del potrero es su consulta satelital mas reciente.
-        ultima = historial.iloc[-1]
+        # El historial ya viene ordenado por fecha de escena, pero la fila mas
+        # reciente puede venir vacia (ese dia el potrero estaba bajo una nube):
+        # se usa la ultima que SI tenga con que estimar, no la ultima a secas.
+        utilizables = historial[historial["NDVI_mean"].notna() | historial["SAVI_mean"].notna()]
+        ultima = (utilizables if not utilizables.empty else historial).iloc[-1]
         precipitacion, temperatura = resumen_clima(clima, ultima["fecha_escena"])
         valores = {c: ultima.get(c) for c in COLUMNAS_INDICES}
         valores["precip_30d_mm"] = precipitacion
@@ -638,20 +727,35 @@ def guardar_salida(ruta, potreros, paquete, args):
     rf = comparacion.get("random_forest", {})
     rl = comparacion.get("regresion_lineal", {})
 
+    def redondear(valor, decimales=2):
+        return round(valor, decimales) if isinstance(valor, (int, float)) else None
+
     hoja_modelo = pd.DataFrame(
         [
             {
                 "algoritmo": paquete["algoritmo"] if paquete else "formula_provisional",
-                "rmse": round(paquete["rmse"], 2) if paquete else None,
-                "r2": round(paquete["r2"], 4) if paquete else None,
+                "rmse": redondear(paquete["rmse"]) if paquete else None,
+                "r2": redondear(paquete["r2"], 4) if paquete else None,
+                "mae": redondear(paquete["mae"]) if paquete else None,
+                "sesgo": redondear(paquete["sesgo"]) if paquete else None,
+                "nrmse_pct": redondear(paquete["nrmse_pct"]) if paquete else None,
                 "n_muestras_entrenamiento": paquete["n_muestras_entrenamiento"] if paquete else None,
+                "n_variables_entrada": paquete["n_variables_entrada"] if paquete else None,
                 "entrenado_el": paquete["entrenado_el"] if paquete else None,
                 "k_validacion": paquete["k_validacion"] if paquete else None,
                 "usa_clima": paquete["usa_clima"] if paquete else None,
-                "rmse_random_forest": round(rf["rmse"], 2) if rf else None,
-                "r2_random_forest": round(rf["r2"], 4) if rf else None,
-                "rmse_regresion_lineal": round(rl["rmse"], 2) if rl else None,
-                "r2_regresion_lineal": round(rl["r2"], 4) if rl else None,
+                "biomasa_media": redondear(paquete["biomasa_media"]) if paquete else None,
+                "biomasa_desv": redondear(paquete["biomasa_desv"]) if paquete else None,
+                "biomasa_min": redondear(paquete["biomasa_min"]) if paquete else None,
+                "biomasa_max": redondear(paquete["biomasa_max"]) if paquete else None,
+                "rmse_random_forest": redondear(rf.get("rmse")) if rf else None,
+                "r2_random_forest": redondear(rf.get("r2"), 4) if rf else None,
+                "mae_random_forest": redondear(rf.get("mae")) if rf else None,
+                "sesgo_random_forest": redondear(rf.get("sesgo")) if rf else None,
+                "rmse_regresion_lineal": redondear(rl.get("rmse")) if rl else None,
+                "r2_regresion_lineal": redondear(rl.get("r2"), 4) if rl else None,
+                "mae_regresion_lineal": redondear(rl.get("mae")) if rl else None,
+                "sesgo_regresion_lineal": redondear(rl.get("sesgo")) if rl else None,
                 "calibracion_a": args.calibracion_a,
                 "calibracion_b": args.calibracion_b,
                 "umbral_rojo": args.umbral_rojo,
@@ -666,11 +770,20 @@ def guardar_salida(ruta, potreros, paquete, args):
     if not hoja_importancia.empty:
         hoja_importancia["importancia"] = hoja_importancia["importancia"].round(4)
 
+    hoja_validacion = pd.DataFrame(
+        paquete["observado_vs_predicho"] if paquete else [],
+        columns=["potrero", "fecha_aforo", "observado", "predicho", "residuo"],
+    )
+    for columna in ("observado", "predicho", "residuo"):
+        if columna in hoja_validacion.columns and not hoja_validacion.empty:
+            hoja_validacion[columna] = hoja_validacion[columna].round(1)
+
     with pd.ExcelWriter(ruta, engine="openpyxl") as escritor:
         potreros.to_excel(escritor, sheet_name="Potreros", index=False)
         hoja_finca.to_excel(escritor, sheet_name="Finca", index=False)
         hoja_modelo.to_excel(escritor, sheet_name="Modelo_Info", index=False)
         hoja_importancia.to_excel(escritor, sheet_name="Modelo_Importancia", index=False)
+        hoja_validacion.to_excel(escritor, sheet_name="Modelo_Validacion", index=False)
 
 
 def cargar_modelo_guardado(ruta):
@@ -736,7 +849,15 @@ def main():
             filas_aforo != paquete_guardado.get("n_filas_aforo")
             or ultima_fecha_aforo != paquete_guardado.get("ultima_fecha_aforo")
         )
-        debe_entrenar = args.modo == "train" or hay_aforo_nuevo
+        # Cambiar --variables (o --clima) tiene que reentrenar igual que un
+        # aforo nuevo: si no, se predice con un modelo viejo que no
+        # corresponde a la configuracion pedida, y las metricas que se
+        # muestran son las de otra corrida.
+        columnas_pedidas = columnas_de_entrada(clima is not None, args.variables)
+        cambio_configuracion = paquete_guardado is not None and (
+            list(paquete_guardado.get("columnas") or []) != list(columnas_pedidas)
+        )
+        debe_entrenar = args.modo == "train" or hay_aforo_nuevo or cambio_configuracion
 
         if not debe_entrenar:
             paquete = paquete_guardado
@@ -745,6 +866,8 @@ def main():
                 f"({paquete['entrenado_el']}); se reutiliza el modelo guardado ({paquete['algoritmo']})."
             )
         else:
+            if cambio_configuracion and not hay_aforo_nuevo and args.modo != "train":
+                print("Modo auto: cambiaron las variables de entrada respecto al modelo guardado; se reentrena.")
             paquete = None
             emparejados = pd.DataFrame()
             if not aforo.empty:
@@ -763,7 +886,9 @@ def main():
                     print("Aviso: se pidio --modo train, pero no hay datos suficientes para entrenar nada.")
             else:
                 print(f"Entrenando con {len(emparejados)} punto(s) de aforo emparejados con satelite:")
-                paquete = entrenar_modelo(emparejados, clima is not None, args.minimo_muestras_entrenamiento)
+                paquete = entrenar_modelo(
+                    emparejados, clima is not None, args.minimo_muestras_entrenamiento, args.variables
+                )
 
             if paquete is not None:
                 paquete["n_filas_aforo"] = filas_aforo
@@ -787,8 +912,15 @@ def main():
     print(f"Potreros procesados: {len(potreros)}")
     if paquete is not None:
         print(
-            f"Modelo: {paquete['algoritmo']} | RMSE = {paquete['rmse']:.1f} kg MS/ha | "
-            f"R2 = {paquete['r2']:.3f} | {paquete['n_muestras_entrenamiento']} muestras | "
+            f"Modelo: {paquete['algoritmo']} | RMSE = {paquete['rmse']:.1f} kg MS/ha "
+            f"({paquete['nrmse_pct']:.1f}% de la media) | R2 = {paquete['r2']:.3f} | "
+            f"MAE = {paquete['mae']:.1f} | sesgo = {paquete['sesgo']:+.1f}"
+        )
+        print(
+            f"  {paquete['n_muestras_entrenamiento']} muestras, {paquete['n_variables_entrada']} variables, "
+            f"k-fold k={paquete['k_validacion']} | biomasa observada: "
+            f"{paquete['biomasa_media']:.0f} +/- {paquete['biomasa_desv']:.0f} kg/ha "
+            f"(rango {paquete['biomasa_min']:.0f}-{paquete['biomasa_max']:.0f}) | "
             f"entrenado el {paquete['entrenado_el']}"
         )
     else:

@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -65,20 +66,41 @@ def cargar_variables_de_entorno_locales():
 
 cargar_variables_de_entorno_locales()
 
-GEOJSON_PATH = Path(os.environ.get("GEOJSON_PATH", str(REPO_DIR / "potreros.geojson")))
+GEOJSON_PATH = Path(os.environ.get("GEOJSON_PATH", "").strip() or str(REPO_DIR / "potreros.geojson"))
 FINCA_NOMBRE = os.environ.get("FINCA_NOMBRE", "Mi finca")
 CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "*")
 
 # Archivo de clima diario (formato NASA POWER: columnas YEAR, DOY, T2M,
 # PRECTOTCORR) opcional. Sin el, el modelo entrena solo con los indices
 # de satelite (sin variables climaticas).
+# Una ruta relativa se resuelve contra backend/, no contra el directorio
+# desde el que se lanzo uvicorn (que puede ser cualquiera).
 _clima_env = os.environ.get("CLIMA_PATH", "").strip()
-CLIMA_PATH = Path(_clima_env) if _clima_env else None
+CLIMA_PATH = None
+if _clima_env:
+    CLIMA_PATH = Path(_clima_env)
+    if not CLIMA_PATH.is_absolute():
+        CLIMA_PATH = BASE_DIR / CLIMA_PATH
 
 # Umbrales del semaforo (kg de materia seca por hectarea), configurables
 # sin tocar codigo -- son un punto de partida razonable, no una ley fija.
 UMBRAL_ROJO = float(os.environ.get("UMBRAL_ROJO", "300"))
 UMBRAL_AMBAR = float(os.environ.get("UMBRAL_AMBAR", "500"))
+
+# Parametros de busqueda de escena Sentinel-2 (earth-engine/extraer_indices.py).
+# Los defaults del script (10 dias, 40% de nubes) son demasiado estrictos en
+# zonas con nubosidad frecuente (por ejemplo epoca de lluvias en el tropico):
+# ahi es facil que no exista NINGUNA escena que los cumpla, y /api/predecir
+# falla en vez de dar una estimacion (aunque sea con mas dias de diferencia o
+# algo mas de nubes). Configurables por si hace falta ajustarlos todavia mas
+# para una finca en particular.
+EE_VENTANA_DIAS = int(os.environ.get("EE_VENTANA_DIAS", "15"))
+EE_UMBRAL_NUBES = float(os.environ.get("EE_UMBRAL_NUBES", "60"))
+
+# Variables de entrada del modelo (lista separada por comas). Vacio = las 12
+# por defecto (10 indices + 2 de clima). Con pocas mediciones de aforo
+# conviene reducirlas: con menos muestras que variables el modelo sobreajusta.
+MODELO_VARIABLES = os.environ.get("MODELO_VARIABLES", "").strip()
 
 app = FastAPI(title="SAD - backend")
 
@@ -97,6 +119,14 @@ class AforoIn(BaseModel):
     altura_cm_2: float
     altura_cm_3: float
     fecha: Optional[str] = None
+
+
+class AforoUpdate(BaseModel):
+    potrero: str
+    fecha: str
+    altura_cm_1: float
+    altura_cm_2: float
+    altura_cm_3: float
 
 
 class GeoJSONIn(BaseModel):
@@ -223,6 +253,19 @@ def cargar_estado() -> dict:
             for fila in leer_hoja_como_dicts(ESTADO_PATH, "Modelo_Importancia")
             if fila.get("variable")
         ]
+        # Hoja opcional "Modelo_Validacion": observado vs predicho fuera de
+        # pliegue, punto por punto (para el grafico de dispersion).
+        modelo_info["validacion"] = [
+            {
+                "potrero": fila.get("potrero"),
+                "fecha_aforo": normalizar_fecha(fila.get("fecha_aforo")),
+                "observado": fila.get("observado"),
+                "predicho": fila.get("predicho"),
+                "residuo": fila.get("residuo"),
+            }
+            for fila in leer_hoja_como_dicts(ESTADO_PATH, "Modelo_Validacion")
+            if fila.get("observado") is not None
+        ]
 
     return {"finca": finca, "actualizado": actualizado, "modelo": modelo_info, "potreros": potreros}
 
@@ -234,7 +277,7 @@ def guardar_estado(estado: dict):
     tirar a la basura las estadisticas del ultimo modelo entrenado."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    hojas_a_preservar = ("Modelo_Info", "Modelo_Importancia")
+    hojas_a_preservar = ("Modelo_Info", "Modelo_Importancia", "Modelo_Validacion")
     filas_preservadas = {}
     if ESTADO_PATH.exists():
         libro_anterior = load_workbook(ESTADO_PATH, data_only=True)
@@ -270,19 +313,84 @@ def guardar_estado(estado: dict):
     libro.save(ESTADO_PATH)
 
 
-def guardar_fila_aforo(potrero: str, fecha: str, h1: float, h2: float, h3: float):
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if AFORO_PATH.exists():
-        libro = load_workbook(AFORO_PATH)
-        hoja = libro["Aforo"] if "Aforo" in libro.sheetnames else libro.active
-    else:
-        libro = Workbook()
-        hoja = libro.active
-        hoja.title = "Aforo"
-        hoja.append(["potrero", "fecha", "altura_cm_1", "altura_cm_2", "altura_cm_3"])
+def leer_aforo() -> list[dict]:
+    """Lee data/aforo_campo.xlsx y devuelve la lista de mediciones, cada una
+    con un 'id' estable para poder editarla o borrarla despues. Los archivos
+    viejos (o filas tocadas a mano en Excel) pueden no traer 'id' todavia:
+    se les asigna uno aqui mismo y se reescribe el archivo una sola vez para
+    que quede persistido."""
+    if not AFORO_PATH.exists():
+        return []
 
-    hoja.append([potrero, fecha, h1, h2, h3])
+    filas = leer_hoja_como_dicts(AFORO_PATH, "Aforo")
+    faltan_ids = False
+    registros = []
+    for fila in filas:
+        id_fila = fila.get("id")
+        if not id_fila:
+            id_fila = uuid.uuid4().hex
+            faltan_ids = True
+        registros.append(
+            {
+                "id": str(id_fila),
+                "potrero": fila.get("potrero"),
+                "fecha": normalizar_fecha(fila.get("fecha")),
+                "altura_cm_1": fila.get("altura_cm_1"),
+                "altura_cm_2": fila.get("altura_cm_2"),
+                "altura_cm_3": fila.get("altura_cm_3"),
+            }
+        )
+
+    if faltan_ids:
+        guardar_aforo(registros)
+
+    return registros
+
+
+def guardar_aforo(registros: list[dict]):
+    """Reescribe data/aforo_campo.xlsx completo a partir de la lista de
+    registros. Se usa para agregar, editar o borrar una medicion -- el
+    archivo es chico (a lo sumo unas pocas decenas de filas en la practica),
+    asi que reescribirlo entero es mas simple que editar in-place."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    libro = Workbook()
+    hoja = libro.active
+    hoja.title = "Aforo"
+    # "id" va al final para no alterar el orden de columnas ya documentado
+    # en modelo/README.md (quien abra el Excel a mano sigue viendo primero
+    # potrero/fecha/alturas).
+    hoja.append(["potrero", "fecha", "altura_cm_1", "altura_cm_2", "altura_cm_3", "id"])
+    for registro in registros:
+        hoja.append(
+            [
+                registro["potrero"],
+                registro["fecha"],
+                registro["altura_cm_1"],
+                registro["altura_cm_2"],
+                registro["altura_cm_3"],
+                registro["id"],
+            ]
+        )
     libro.save(AFORO_PATH)
+
+
+def validar_aforo(nombre_potrero: str, fecha: str, h1: float, h2: float, h3: float):
+    nombres_validos = {p["nombre"] for p in cargar_estado()["potreros"]}
+    if nombres_validos and nombre_potrero not in nombres_validos:
+        raise HTTPException(404, f"No existe un potrero llamado '{nombre_potrero}' en el GeoJSON de la finca.")
+
+    for etiqueta, valor in (("altura_cm_1", h1), ("altura_cm_2", h2), ("altura_cm_3", h3)):
+        if not (0 < valor <= 200):
+            raise HTTPException(
+                400,
+                f"La medida '{etiqueta}' debe ser un numero mayor que 0 y menor o igual a 200 cm "
+                f"(se recibio {valor}).",
+            )
+
+    try:
+        datetime.strptime(fecha, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, f"La fecha '{fecha}' debe tener el formato AAAA-MM-DD.")
 
 
 def agregar_indices_al_historial(ruta_temp: Path, fecha_consulta: str):
@@ -383,34 +491,63 @@ def eliminar_potrero(nombre: str):
 
 @app.post("/api/potreros/{nombre}/aforo")
 def registrar_aforo(nombre: str, body: AforoIn):
-    nombres_validos = {p["nombre"] for p in cargar_estado()["potreros"]}
-    if nombres_validos and nombre not in nombres_validos:
-        raise HTTPException(404, f"No existe un potrero llamado '{nombre}' en el GeoJSON de la finca.")
+    fecha = body.fecha or date.today().isoformat()
+    validar_aforo(nombre, fecha, body.altura_cm_1, body.altura_cm_2, body.altura_cm_3)
 
-    for etiqueta, valor in (
-        ("altura_cm_1", body.altura_cm_1),
-        ("altura_cm_2", body.altura_cm_2),
-        ("altura_cm_3", body.altura_cm_3),
-    ):
-        if not (0 < valor <= 200):
-            raise HTTPException(
-                400,
-                f"La medida '{etiqueta}' debe ser un numero mayor que 0 y menor o igual a 200 cm "
-                f"(se recibio {valor}).",
-            )
-
-    if body.fecha:
-        try:
-            datetime.strptime(body.fecha, "%Y-%m-%d")
-        except ValueError:
-            raise HTTPException(400, f"La fecha '{body.fecha}' debe tener el formato AAAA-MM-DD.")
-        fecha = body.fecha
-    else:
-        fecha = date.today().isoformat()
-
-    guardar_fila_aforo(nombre, fecha, body.altura_cm_1, body.altura_cm_2, body.altura_cm_3)
+    registros = leer_aforo()
+    registros.append(
+        {
+            "id": uuid.uuid4().hex,
+            "potrero": nombre,
+            "fecha": fecha,
+            "altura_cm_1": body.altura_cm_1,
+            "altura_cm_2": body.altura_cm_2,
+            "altura_cm_3": body.altura_cm_3,
+        }
+    )
+    guardar_aforo(registros)
 
     return {"mensaje": f"Medicion guardada para '{nombre}' el {fecha}.", "potrero": nombre, "fecha": fecha}
+
+
+@app.get("/api/aforo")
+def listar_aforo():
+    """Historial completo de mediciones de campo, mas recientes primero --
+    lo consume la pestana 'Registrar medicion' para mostrar/editar/borrar."""
+    registros = leer_aforo()
+    registros.sort(key=lambda r: (r["fecha"] or "", r["potrero"] or ""), reverse=True)
+    return {"aforo": registros}
+
+
+@app.put("/api/aforo/{id_registro}")
+def editar_aforo(id_registro: str, body: AforoUpdate):
+    validar_aforo(body.potrero, body.fecha, body.altura_cm_1, body.altura_cm_2, body.altura_cm_3)
+
+    registros = leer_aforo()
+    for registro in registros:
+        if registro["id"] == id_registro:
+            registro.update(
+                potrero=body.potrero,
+                fecha=body.fecha,
+                altura_cm_1=body.altura_cm_1,
+                altura_cm_2=body.altura_cm_2,
+                altura_cm_3=body.altura_cm_3,
+            )
+            guardar_aforo(registros)
+            return {"mensaje": "Medicion actualizada.", "aforo": registro}
+
+    raise HTTPException(404, f"No existe ninguna medicion con id '{id_registro}'.")
+
+
+@app.delete("/api/aforo/{id_registro}")
+def borrar_aforo(id_registro: str):
+    registros = leer_aforo()
+    restantes = [r for r in registros if r["id"] != id_registro]
+    if len(restantes) == len(registros):
+        raise HTTPException(404, f"No existe ninguna medicion con id '{id_registro}'.")
+
+    guardar_aforo(restantes)
+    return {"mensaje": "Medicion borrada."}
 
 
 @app.post("/api/predecir")
@@ -447,6 +584,8 @@ def predecir():
                 "--fecha", fecha_hoy,
                 "--proyecto", ee_project,
                 "--salida", str(INDICES_TEMP_PATH),
+                "--ventana-dias", str(EE_VENTANA_DIAS),
+                "--umbral-nubes", str(EE_UMBRAL_NUBES),
             ],
             capture_output=True,
             text=True,
@@ -481,6 +620,8 @@ def predecir():
         "--umbral-ambar", str(UMBRAL_AMBAR),
         "--modo", "auto",
     ]
+    if MODELO_VARIABLES:
+        argumentos_modelo += ["--variables", MODELO_VARIABLES]
     if CLIMA_PATH:
         if not CLIMA_PATH.exists():
             raise HTTPException(

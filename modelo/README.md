@@ -100,8 +100,19 @@ python entrenar_predecir.py \
   [--umbral-rojo 300] [--umbral-ambar 500] \
   [--calibracion-a 50] [--calibracion-b 15] \
   [--minimo-muestras-entrenamiento 8] [--ventana-emparejamiento-dias 15] \
+  [--variables NDVI_mean,NDVI_stdDev,precip_30d_mm] \
   [--modo auto|train|predict]
 ```
+
+`--variables` limita las variables de entrada (por defecto se usan las 12:
+10 índices + 2 de clima). **Con pocas mediciones esto importa mucho**: con
+menos muestras que variables el modelo sobreajusta y el R² se vuelve
+negativo. Con las 8 mediciones de la finca de prueba, las 12 variables dan
+R² = −0.43; `NDVI_mean,NDVI_stdDev,precip_30d_mm` da R² = 0.42. Ojo al
+reportarlo: elegir el subconjunto mirando cuál valida mejor sobre los mismos
+puntos sesga la métrica hacia arriba — para un resultado defendible hay que
+fijar el subconjunto *a priori* (por literatura) o validarlo con datos
+nuevos.
 
 `--modo auto` (default): reentrena solo si hay aforo más nuevo que el
 último entrenamiento guardado; si no, predice con el modelo ya guardado.
@@ -125,6 +136,10 @@ para un potrero (el backend la va acumulando, nunca la sobreescribe):
 ### `--aforo` (`backend/data/aforo_campo.xlsx`)
 
 Hoja **"Aforo"**: `potrero, fecha, altura_cm_1, altura_cm_2, altura_cm_3`.
+El backend le agrega ademas una columna `id` (para poder editar/borrar
+mediciones desde `PUT`/`DELETE /api/aforo/{id}`) que este script ignora
+por completo -- lee las columnas por nombre y solo le importan las cinco
+de arriba.
 
 ### `--clima` (opcional)
 
@@ -154,10 +169,28 @@ los que nunca se han medido en campo):
 archivo anterior, si existía), `actualizado` (fecha/hora de esta corrida).
 
 **"Modelo_Info"** — una fila con metadatos de transparencia:
-`algoritmo` (`"random_forest"`, `"regresion_lineal"` o
-`"formula_provisional"`), `rmse`, `r2`, `n_muestras_entrenamiento`,
-`entrenado_el`, `calibracion_a`, `calibracion_b`, `umbral_rojo`,
-`umbral_ambar`.
+
+- Identificación: `algoritmo` (`"random_forest"`, `"regresion_lineal"` o
+  `"formula_provisional"`), `entrenado_el`, `n_muestras_entrenamiento`,
+  `n_variables_entrada`, `k_validacion`, `usa_clima`.
+- Métricas del ganador, todas sobre las predicciones **fuera de pliegue**:
+  `rmse`, `r2`, `mae`, `sesgo` (error medio: positivo = sobreestima),
+  `nrmse_pct` (RMSE como % de la biomasa media, para comparar contra
+  estudios de otras fincas donde la escala de kg/ha cambia).
+- Descriptivas de la muestra: `biomasa_media`, `biomasa_desv`,
+  `biomasa_min`, `biomasa_max` — sin el rango y la dispersión, un RMSE en
+  kg/ha no se puede interpretar.
+- Métricas de **ambos** algoritmos, para la tabla comparativa:
+  `rmse_random_forest`, `r2_random_forest`, `mae_random_forest`,
+  `sesgo_random_forest` y sus equivalentes `_regresion_lineal`.
+- Parámetros usados: `calibracion_a`, `calibracion_b`, `umbral_rojo`,
+  `umbral_ambar`.
+
+**"Modelo_Validacion"** — una fila por punto de entrenamiento con su
+predicción fuera de pliegue: `potrero`, `fecha_aforo`, `observado`,
+`predicho`, `residuo`. Es la tabla con la que la app arma el gráfico de
+dispersión observado vs. predicho (la figura estándar para reportar un
+modelo de estimación de biomasa).
 
 El backend lee estas hojas por nombre de columna (no por posición), así
 que se puede abrir el Excel y corregir algo a mano sin romper nada.
@@ -206,10 +239,12 @@ consola con el potrero, la fecha y los días de diferencia. Las variables
 de clima de ese punto se calculan sobre la fecha de la **escena** (no la
 del aforo): `precip_30d_mm` es la suma de `PRECTOTCORR` y `temp_media_c`
 el promedio de `T2M` de los 30 días previos incluyendo ese día, ignorando
-los `-999` de NASA POWER. Para predecir se usa siempre la escena más
-reciente de cada potrero; un potrero sin ninguna fila en el historial (o
-cuya última escena no tiene NDVI ni SAVI utilizables) queda en
-`sin_datos` en vez de romper la corrida.
+los `-999` de NASA POWER. Para predecir se usa la escena más reciente de
+cada potrero **que tenga NDVI o SAVI utilizables**: la fila más reciente
+puede venir vacía porque ese día el potrero estaba bajo una nube, y ahí es
+preferible el último dato real (de hace unos días) antes que quedarse sin
+estimación. Un potrero sin ninguna fila en el historial, o sin ninguna con
+índices utilizables, queda en `sin_datos` en vez de romper la corrida.
 
 ## Pruebas
 

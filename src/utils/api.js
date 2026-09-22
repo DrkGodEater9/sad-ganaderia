@@ -53,3 +53,27 @@ export async function registrarAforo(nombrePotrero, cuerpo) {
   if (!respuesta.ok) throw new Error(await extraerMensajeError(respuesta));
   return respuesta.json();
 }
+
+export async function obtenerHistorialAforo() {
+  const respuesta = await fetch(`${API_BASE_URL}/api/aforo`);
+  if (!respuesta.ok) throw new Error(await extraerMensajeError(respuesta));
+  return respuesta.json();
+}
+
+export async function editarAforo(id, cuerpo) {
+  const respuesta = await fetch(`${API_BASE_URL}/api/aforo/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(cuerpo),
+  });
+  if (!respuesta.ok) throw new Error(await extraerMensajeError(respuesta));
+  return respuesta.json();
+}
+
+export async function borrarAforo(id) {
+  const respuesta = await fetch(`${API_BASE_URL}/api/aforo/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!respuesta.ok) throw new Error(await extraerMensajeError(respuesta));
+  return respuesta.json();
+}

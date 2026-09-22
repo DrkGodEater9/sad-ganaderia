@@ -50,10 +50,10 @@ python extraer_indices.py \
 ```
 
 Esto busca, dentro de una ventana de +/-10 dias alrededor del 2026-09-20,
-la escena Sentinel-2 con menos nubes y mas cercana a esa fecha, calcula los
-indices por cada potrero del archivo `../potreros.geojson`, y guarda el
-resultado en `indices_potreros.csv` (en la misma carpeta desde donde
-corras el script).
+la escena Sentinel-2 mas cercana a esa fecha que deje indices utilizables,
+calcula los indices por cada potrero del archivo `../potreros.geojson`, y
+guarda el resultado en `indices_potreros.csv` (en la misma carpeta desde
+donde corras el script).
 
 ### Parametros
 
@@ -73,6 +73,25 @@ o `$env:EE_PROJECT="mi-proyecto-gee"` en PowerShell).
 Si no encuentra ninguna escena que cumpla las condiciones (nubosidad o
 ventana de fechas muy estrictas), el script lo avisa por consola en vez de
 fallar en silencio, y sugiere aumentar `--ventana-dias` o `--umbral-nubes`.
+
+### Como elige la escena
+
+`CLOUDY_PIXEL_PERCENTAGE` es el porcentaje de nubes del **tile completo**
+de Sentinel-2 (110 x 110 km), no del area de tus potreros: una escena puede
+pasar ese filtro y aun asi tener justo los potreros bajo una nube o su
+sombra, y quedar sin un solo pixel valido despues del enmascarado por `SCL`.
+
+Por eso el script no se queda con una sola escena: recorre las candidatas de
+la ventana de la mas cercana a la mas lejana (hasta 25) y se queda, **para
+cada potrero por separado**, con la primera que le haya dejado indices
+utilizables. Potreros distintos pueden terminar con escenas de fechas
+distintas — cada fila del resultado lleva su propia `fecha_escena_usada` y
+`dias_diferencia_con_fecha_objetivo`. Es preferible un dato real de hace
+unos dias que ningun dato porque ese dia habia una nube encima.
+
+Un potrero que no consiguio indices en ninguna candidata queda con los
+indices vacios (el modelo lo interpreta como `sin_datos`), y el script lo
+avisa por consola.
 
 ## 5. Que calcula
 
@@ -98,7 +117,6 @@ los 5 indices.
   del GeoJSON (la que genera SAD al exportar) — el script no
   tiene hardcodeado ningun nombre de finca ni coordenada, sirve para
   cualquier GeoJSON con ese formato.
-- Si la finca es muy grande y cae en dos tiles distintos de Sentinel-2, el
-  script usa una sola escena (la mas cercana a la fecha objetivo que cubra
-  el area de los potreros); si ves potreros sin datos en el CSV, revisa que
-  la escena elegida cubra toda la finca.
+- Si la finca es muy grande y cae en dos tiles distintos de Sentinel-2,
+  cada potrero se resuelve con la escena que le sirva (ver "Como elige la
+  escena"), asi que no hace falta que un solo tile cubra toda la finca.

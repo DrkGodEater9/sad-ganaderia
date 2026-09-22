@@ -441,6 +441,116 @@ strong {
   color: var(--color-texto-suave);
 }
 
+/* Dispersión observado vs. predicho */
+
+.dispersion {
+  display: block;
+  width: 100%;
+  max-width: 420px;
+  margin: 0 auto;
+  height: auto;
+  overflow: visible;
+}
+
+.dispersion-grid {
+  stroke: var(--color-borde);
+  stroke-width: 1;
+}
+
+.dispersion-diagonal {
+  stroke: var(--color-texto-suave);
+  stroke-width: 2;
+  stroke-dasharray: 6 5;
+  opacity: 0.7;
+}
+
+.dispersion-punto {
+  stroke: var(--color-superficie);
+  stroke-width: 2;
+  cursor: pointer;
+}
+
+.dispersion-punto:hover,
+.dispersion-punto:focus {
+  stroke: var(--color-texto);
+  outline: none;
+}
+
+.dispersion-tick {
+  font-size: 11px;
+  fill: var(--color-texto-suave);
+}
+
+.dispersion-eje {
+  font-size: 12px;
+  font-weight: 700;
+  fill: var(--color-texto-suave);
+}
+
+/* Tablas de métricas */
+
+.tabla-scroll {
+  overflow-x: auto;
+  margin: 10px 0 4px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.tabla-metricas {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tabla-metricas th,
+.tabla-metricas td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--color-borde);
+  white-space: nowrap;
+}
+
+.tabla-metricas th[scope="row"] {
+  font-weight: 700;
+  color: var(--color-texto);
+}
+
+.tabla-metricas thead th {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-texto-suave);
+  border-bottom-width: 2px;
+}
+
+.tabla-metricas .tabla-nota {
+  font-size: 12px;
+  color: var(--color-texto-suave);
+  white-space: normal;
+}
+
+.tabla-validacion td,
+.tabla-validacion th {
+  text-align: right;
+}
+
+.tabla-validacion td:first-child,
+.tabla-validacion th:first-child,
+.tabla-validacion td:nth-child(2),
+.tabla-validacion th:nth-child(2) {
+  text-align: left;
+}
+
+.aviso-metodologico {
+  margin: 14px 0 4px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border-left: 4px solid var(--color-ambar);
+  background: var(--color-ambar-tenue);
+  font-size: 14px;
+  color: var(--color-texto);
+}
+
 /* Estado de "Actualizar recomendaciones" */
 
 .texto-estado {
@@ -668,6 +778,61 @@ input:focus {
 
 form .boton {
   margin-top: 10px;
+}
+
+/* Historial de mediciones (dentro de "Registrar medición") */
+
+.historial-aforo {
+  margin-top: 28px;
+}
+
+.historial-aforo h3 {
+  margin: 0 0 10px;
+}
+
+.lista-historial {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tarjeta-aforo {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--color-superficie);
+  border: 2px solid var(--color-borde);
+  border-radius: 16px;
+  padding: 12px 16px;
+}
+
+.tarjeta-aforo-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tarjeta-aforo-potrero {
+  font-weight: 700;
+  color: var(--color-texto);
+}
+
+.tarjeta-aforo-fecha,
+.tarjeta-aforo-alturas {
+  font-size: 14px;
+  color: var(--color-texto-suave);
+}
+
+.tarjeta-aforo-acciones {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.boton-enlace-peligro {
+  color: var(--color-rojo);
 }
 
 /* Navegación entre las tres vistas de la app (fija abajo) */

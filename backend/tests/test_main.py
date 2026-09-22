@@ -183,6 +183,139 @@ def test_registrar_aforo_dos_mediciones_se_acumulan(cliente):
     assert len(main.leer_hoja_como_dicts(main.AFORO_PATH, "Aforo")) == 2
 
 
+def test_listar_aforo_vacio(cliente):
+    respuesta = cliente.get("/api/aforo")
+    assert respuesta.status_code == 200
+    assert respuesta.json() == {"aforo": []}
+
+
+def test_listar_aforo_devuelve_id_y_orden_reciente_primero(cliente):
+    cliente.post(
+        "/api/potreros/Potrero 1/aforo",
+        json={"altura_cm_1": 10, "altura_cm_2": 10, "altura_cm_3": 10, "fecha": "2026-09-01"},
+    )
+    cliente.post(
+        "/api/potreros/Potrero 2/aforo",
+        json={"altura_cm_1": 12, "altura_cm_2": 12, "altura_cm_3": 12, "fecha": "2026-09-15"},
+    )
+
+    registros = cliente.get("/api/aforo").json()["aforo"]
+    assert [r["potrero"] for r in registros] == ["Potrero 2", "Potrero 1"]
+    assert all(r["id"] for r in registros)
+    assert len({r["id"] for r in registros}) == 2
+
+
+def test_listar_aforo_asigna_id_a_filas_viejas_sin_id(cliente):
+    from openpyxl import Workbook
+
+    main.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    libro = Workbook()
+    hoja = libro.active
+    hoja.title = "Aforo"
+    hoja.append(["potrero", "fecha", "altura_cm_1", "altura_cm_2", "altura_cm_3"])
+    hoja.append(["Potrero 1", "2026-08-01", 10, 10, 10])
+    libro.save(main.AFORO_PATH)
+
+    registros = cliente.get("/api/aforo").json()["aforo"]
+    assert len(registros) == 1
+    assert registros[0]["id"]
+
+    # El id quedo persistido: una segunda lectura devuelve el mismo id.
+    otra_lectura = cliente.get("/api/aforo").json()["aforo"]
+    assert otra_lectura[0]["id"] == registros[0]["id"]
+
+
+def test_editar_aforo_actualiza_campos(cliente):
+    creado = cliente.post(
+        "/api/potreros/Potrero 1/aforo",
+        json={"altura_cm_1": 10, "altura_cm_2": 10, "altura_cm_3": 10, "fecha": "2026-09-01"},
+    )
+    id_registro = cliente.get("/api/aforo").json()["aforo"][0]["id"]
+
+    respuesta = cliente.put(
+        f"/api/aforo/{id_registro}",
+        json={"potrero": "Potrero 2", "fecha": "2026-09-05", "altura_cm_1": 15, "altura_cm_2": 15, "altura_cm_3": 15},
+    )
+    assert respuesta.status_code == 200
+
+    registros = cliente.get("/api/aforo").json()["aforo"]
+    assert len(registros) == 1
+    assert registros[0]["id"] == id_registro
+    assert registros[0]["potrero"] == "Potrero 2"
+    assert registros[0]["fecha"] == "2026-09-05"
+    assert registros[0]["altura_cm_1"] == 15
+
+
+def test_editar_aforo_inexistente_da_404(cliente):
+    respuesta = cliente.put(
+        "/api/aforo/no-existe",
+        json={"potrero": "Potrero 1", "fecha": "2026-09-05", "altura_cm_1": 15, "altura_cm_2": 15, "altura_cm_3": 15},
+    )
+    assert respuesta.status_code == 404
+
+
+def test_editar_aforo_valida_altura_y_potrero(cliente):
+    cliente.post(
+        "/api/potreros/Potrero 1/aforo",
+        json={"altura_cm_1": 10, "altura_cm_2": 10, "altura_cm_3": 10, "fecha": "2026-09-01"},
+    )
+    id_registro = cliente.get("/api/aforo").json()["aforo"][0]["id"]
+
+    respuesta_altura = cliente.put(
+        f"/api/aforo/{id_registro}",
+        json={"potrero": "Potrero 1", "fecha": "2026-09-05", "altura_cm_1": 999, "altura_cm_2": 15, "altura_cm_3": 15},
+    )
+    assert respuesta_altura.status_code == 400
+
+    respuesta_potrero = cliente.put(
+        f"/api/aforo/{id_registro}",
+        json={"potrero": "Potrero Fantasma", "fecha": "2026-09-05", "altura_cm_1": 15, "altura_cm_2": 15, "altura_cm_3": 15},
+    )
+    assert respuesta_potrero.status_code == 404
+
+
+def test_borrar_aforo(cliente):
+    cliente.post(
+        "/api/potreros/Potrero 1/aforo",
+        json={"altura_cm_1": 10, "altura_cm_2": 10, "altura_cm_3": 10, "fecha": "2026-09-01"},
+    )
+    id_registro = cliente.get("/api/aforo").json()["aforo"][0]["id"]
+
+    respuesta = cliente.delete(f"/api/aforo/{id_registro}")
+    assert respuesta.status_code == 200
+    assert cliente.get("/api/aforo").json()["aforo"] == []
+
+
+def test_borrar_aforo_inexistente_da_404(cliente):
+    respuesta = cliente.delete("/api/aforo/no-existe")
+    assert respuesta.status_code == 404
+
+
+def test_predecir_pasa_ventana_y_umbral_de_nubes_al_script_de_indices(cliente, monkeypatch):
+    monkeypatch.setenv("EE_PROJECT", "mi-proyecto")
+    monkeypatch.setattr(main, "EE_VENTANA_DIAS", 21)
+    monkeypatch.setattr(main, "EE_UMBRAL_NUBES", 75)
+
+    capturado = {}
+
+    def subprocess_run_falso(comando, **kwargs):
+        capturado["comando"] = comando
+        import subprocess as subprocess_real
+
+        return subprocess_real.CompletedProcess(comando, returncode=1, stdout="", stderr="fallo simulado")
+
+    monkeypatch.setattr(main.subprocess, "run", subprocess_run_falso)
+
+    respuesta = cliente.post("/api/predecir")
+    assert respuesta.status_code == 502
+
+    comando = capturado["comando"]
+    assert "--ventana-dias" in comando
+    assert comando[comando.index("--ventana-dias") + 1] == "21"
+    assert "--umbral-nubes" in comando
+    assert comando[comando.index("--umbral-nubes") + 1] == "75"
+
+
 def test_predecir_sin_geojson(cliente, monkeypatch, tmp_path):
     monkeypatch.setattr(main, "GEOJSON_PATH", tmp_path / "no_existe.geojson")
     respuesta = cliente.post("/api/predecir")

@@ -51,6 +51,18 @@ razonables para desarrollo local:
 - `UMBRAL_ROJO` / `UMBRAL_AMBAR` (default `300`/`500`): umbrales del
   semaforo en kg de materia seca por hectarea. Ajustalos con el criterio
   del productor de la finca.
+- `MODELO_VARIABLES` (opcional, vacio = las 12 por defecto): lista separada
+  por comas de las variables de entrada del modelo, por ejemplo
+  `NDVI_mean,NDVI_stdDev,precip_30d_mm`. Con pocas mediciones de aforo
+  conviene reducirlas — con menos muestras que variables el modelo
+  sobreajusta y el R2 se vuelve negativo. Cambiarla fuerza un
+  reentrenamiento en la siguiente corrida de `/api/predecir`.
+- `EE_VENTANA_DIAS` / `EE_UMBRAL_NUBES` (default `15`/`60`): cuantos dias
+  antes/despues de hoy y que porcentaje maximo de nubes se acepta al buscar
+  una escena Sentinel-2 utilizable. Si `POST /api/predecir` falla con "No se
+  encontro ninguna escena Sentinel-2 que cumpla las condiciones" (comun en
+  epoca de lluvias, o si tu finca esta en una zona con nubosidad frecuente),
+  sube estos valores.
 
 ## 4. Levantar el servidor
 
@@ -141,6 +153,42 @@ numeros entre 0 y 200 cm. Agrega la fila a
 lo puedes abrir para revisarlo o corregir algo a mano cuando quieras (el
 backend lee las columnas por nombre de encabezado, no por posicion).
 
+### `GET /api/aforo`
+
+Historial completo de mediciones de campo de todos los potreros, mas
+recientes primero. Cada registro trae un `id` estable
+(se asigna automaticamente la primera vez que se lee un archivo viejo que
+no lo tenia, por ejemplo si `aforo_campo.xlsx` se creo con una version
+anterior del backend o se edito a mano). Lo usa la pestaña "Registrar
+medicion" para mostrar el historial y permitir editar o borrar.
+
+```json
+{
+  "aforo": [
+    {
+      "id": "3f9a1c2b4e5d4a6f8b9c0d1e2f3a4b5c",
+      "potrero": "Potrero 1",
+      "fecha": "2026-09-21",
+      "altura_cm_1": 12.5,
+      "altura_cm_2": 14.0,
+      "altura_cm_3": 13.2
+    }
+  ]
+}
+```
+
+### `PUT /api/aforo/{id}`
+
+Cuerpo (JSON): `potrero`, `fecha`, `altura_cm_1`, `altura_cm_2`,
+`altura_cm_3` (todos requeridos). Mismas validaciones que `POST
+/api/potreros/{nombre}/aforo` (potrero existente, alturas entre 0 y 200 cm,
+fecha en formato AAAA-MM-DD). 404 si no existe una medicion con ese `id`.
+
+### `DELETE /api/aforo/{id}`
+
+Borra esa medicion de `data/aforo_campo.xlsx`. 404 si no existe una
+medicion con ese `id`.
+
 ### `POST /api/predecir`
 
 Sin cuerpo. En orden:
@@ -183,7 +231,8 @@ repositorio (ver `.gitignore`) porque son datos propios de cada finca:
   se uso, que tan bueno es, cuando se entreno). Es la fuente de verdad
   que lee `GET /api/potreros`.
 - `aforo_campo.xlsx` — hoja "Aforo" con el historial de mediciones de
-  campo.
+  campo (incluye una columna `id` al final, que usan `PUT`/`DELETE
+  /api/aforo/{id}` para identificar cada fila).
 - `indices_historial.xlsx` — historial acumulado de indices de satelite
   (una fila por potrero cada vez que se corre `/api/predecir`), lo usa
   `modelo/entrenar_predecir.py` para entrenar.
