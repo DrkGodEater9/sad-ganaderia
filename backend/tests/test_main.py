@@ -412,3 +412,58 @@ def test_estado_invalido_en_excel_cae_a_sin_datos(cliente):
 
     recargado = main.cargar_estado()
     assert recargado["potreros"][0]["estado"] == "sin_datos"
+
+
+def test_guardar_geojson_rechaza_nombres_duplicados(cliente):
+    feature = {"type": "Feature", "properties": {"nombre": "A"}, "geometry": {"type": "Point", "coordinates": [0, 0]}}
+    respuesta = cliente.post("/api/geojson", json={"type": "FeatureCollection", "features": [feature, feature]})
+    assert respuesta.status_code == 400
+    assert "unicos" in respuesta.json()["detail"]
+
+
+def test_guardar_geojson_rechaza_potrero_sin_geometria(cliente):
+    feature = {"type": "Feature", "properties": {"nombre": "A"}, "geometry": None}
+    respuesta = cliente.post("/api/geojson", json={"type": "FeatureCollection", "features": [feature]})
+    assert respuesta.status_code == 400
+
+
+def _escribir_temp_indices(ruta, filas, columnas):
+    from openpyxl import Workbook
+
+    libro = Workbook()
+    hoja = libro.active
+    hoja.append(columnas)
+    for fila in filas:
+        hoja.append(fila)
+    libro.save(ruta)
+
+
+def test_historial_de_indices_no_duplica_escenas_y_alinea_por_nombre(cliente):
+    main.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    columnas = ["potrero", "fecha_escena_usada", "NDVI_mean"]
+    _escribir_temp_indices(main.INDICES_TEMP_PATH, [["P1", "2026-09-01", 0.5]], columnas)
+    main.agregar_indices_al_historial(main.INDICES_TEMP_PATH, "2026-09-02")
+
+    # Misma escena otra vez (no debe duplicarse) + una nueva, con las columnas en otro orden.
+    _escribir_temp_indices(
+        main.INDICES_TEMP_PATH,
+        [[0.5, "P1", "2026-09-01"], [0.6, "P1", "2026-09-10"]],
+        ["NDVI_mean", "potrero", "fecha_escena_usada"],
+    )
+    main.agregar_indices_al_historial(main.INDICES_TEMP_PATH, "2026-09-11")
+
+    filas = main.leer_hoja_como_dicts(main.INDICES_HISTORIAL_PATH, "Indices")
+    assert [(f["fecha_escena_usada"], f["NDVI_mean"], f["potrero"]) for f in filas] == [
+        ("2026-09-01", 0.5, "P1"),
+        ("2026-09-10", 0.6, "P1"),
+    ]
+    assert not main.INDICES_TEMP_PATH.exists()
+
+
+def test_predecir_rechaza_corrida_simultanea(cliente):
+    assert main._LOCK_PREDICCION.acquire(blocking=False)
+    try:
+        respuesta = cliente.post("/api/predecir")
+    finally:
+        main._LOCK_PREDICCION.release()
+    assert respuesta.status_code == 409

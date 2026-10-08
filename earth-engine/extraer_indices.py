@@ -12,7 +12,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -221,7 +221,7 @@ def buscar_escenas_candidatas(area_total, fecha_objetivo, ventana_dias, umbral_n
         candidatas.append(
             {
                 "imagen": imagen,
-                "fecha_escena": datetime.utcfromtimestamp(propiedades["system:time_start"] / 1000).date(),
+                "fecha_escena": datetime.fromtimestamp(propiedades["system:time_start"] / 1000, tz=timezone.utc).date(),
                 "dias_diferencia": round(propiedades["dias_diferencia"]),
                 "nubes": propiedades.get("CLOUDY_PIXEL_PERCENTAGE"),
                 "id_escena": propiedades.get("system:index"),

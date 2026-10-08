@@ -10,6 +10,7 @@ columnas y argumentos que espera el backend).
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -805,6 +806,19 @@ def huella_del_aforo(aforo):
     return int(len(aforo)), ultima.isoformat()
 
 
+def contenido_del_aforo(aforo, calibracion_a, calibracion_b, ventana_dias):
+    """Hash del CONTENIDO del aforo (potrero, fecha y biomasa de cada fila)
+    mas la calibracion y la ventana de emparejamiento. Contar filas y mirar
+    la ultima fecha no detecta que se EDITARA una medicion (misma cantidad,
+    mismas fechas, otra altura), ni que se cambie --calibracion-a/b: en esos
+    casos el modo auto seguia prediciendo con un modelo ya desactualizado."""
+    filas = sorted(
+        f"{r.potrero}|{r.fecha_aforo.isoformat()}|{r.biomasa_kg_ms_ha:.3f}" for r in aforo.itertuples(index=False)
+    )
+    texto = "\n".join(filas + [f"cal={calibracion_a:.6g},{calibracion_b:.6g}", f"ventana={ventana_dias}"])
+    return hashlib.sha256(texto.encode("utf-8")).hexdigest()
+
+
 def main():
     args = parse_args()
 
@@ -832,6 +846,9 @@ def main():
 
     paquete_guardado = cargar_modelo_guardado(ruta_modelo)
     filas_aforo, ultima_fecha_aforo = huella_del_aforo(aforo)
+    contenido_aforo = contenido_del_aforo(
+        aforo, args.calibracion_a, args.calibracion_b, args.ventana_emparejamiento_dias
+    )
 
     if args.modo == "predict":
         if paquete_guardado is None:
@@ -845,9 +862,13 @@ def main():
         paquete = paquete_guardado
         print(f"Modo predict: se usa el modelo guardado ({paquete['algoritmo']}, entrenado el {paquete['entrenado_el']}).")
     else:
+        # "contenido_aforo" no existe en modelos guardados por versiones
+        # anteriores: en ese caso se compara solo por cantidad y ultima fecha.
+        hash_guardado = paquete_guardado.get("contenido_aforo") if paquete_guardado is not None else None
         hay_aforo_nuevo = paquete_guardado is None or (
             filas_aforo != paquete_guardado.get("n_filas_aforo")
             or ultima_fecha_aforo != paquete_guardado.get("ultima_fecha_aforo")
+            or (hash_guardado is not None and hash_guardado != contenido_aforo)
         )
         # Cambiar --variables (o --clima) tiene que reentrenar igual que un
         # aforo nuevo: si no, se predice con un modelo viejo que no
@@ -893,6 +914,7 @@ def main():
             if paquete is not None:
                 paquete["n_filas_aforo"] = filas_aforo
                 paquete["ultima_fecha_aforo"] = ultima_fecha_aforo
+                paquete["contenido_aforo"] = contenido_aforo
                 os.makedirs(os.path.dirname(os.path.abspath(ruta_modelo)) or ".", exist_ok=True)
                 joblib.dump(paquete, ruta_modelo)
                 print(

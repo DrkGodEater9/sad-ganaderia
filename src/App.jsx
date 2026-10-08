@@ -306,12 +306,13 @@ export default function App() {
       {vista === "estadisticas" && <EstadisticasModelo />}
       </ErrorBoundary>
 
-      <nav className="nav-inferior">
+      <nav className="nav-inferior" aria-label="Secciones">
         {VISTAS.map((v) => (
           <button
             key={v.clave}
             type="button"
             className={`nav-boton${vista === v.clave ? " nav-boton-activo" : ""}`}
+            aria-current={vista === v.clave ? "page" : undefined}
             onClick={() => setVista(v.clave)}
           >
             {v.etiqueta}

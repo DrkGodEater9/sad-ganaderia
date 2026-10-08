@@ -1,3 +1,4 @@
-fastapi
-uvicorn[standard]
-openpyxl
+fastapi>=0.110
+uvicorn[standard]>=0.29
+openpyxl>=3.1
+pydantic>=2

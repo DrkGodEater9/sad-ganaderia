@@ -7,7 +7,7 @@ export default [
   // resources/ es material de referencia del dueno del proyecto (incluye un
   // script suelto para el editor web de Earth Engine, con sus propios
   // globals `ee`/`Export`): no es parte del codigo de esta app.
-  { ignores: ["dist/", "node_modules/", "resources/"] },
+  { ignores: ["dist/", "node_modules/", "resources/", ".venv/", ".claude/", "**/__pycache__/"] },
   js.configs.recommended,
   {
     // La app React/Vite (dibujar potreros).

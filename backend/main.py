@@ -10,7 +10,9 @@ lee/escribe los mismos archivos de datos que ellos usan.
 import json
 import os
 import subprocess
+import shutil
 import sys
+import threading
 import uuid
 from datetime import date, datetime
 from pathlib import Path
@@ -102,6 +104,20 @@ EE_UMBRAL_NUBES = float(os.environ.get("EE_UMBRAL_NUBES", "60"))
 # conviene reducirlas: con menos muestras que variables el modelo sobreajusta.
 MODELO_VARIABLES = os.environ.get("MODELO_VARIABLES", "").strip()
 
+# Tiempo maximo (segundos) que se espera a cada subproceso. Sin tope, una
+# consulta colgada a Earth Engine (o un ee.Authenticate() esperando un
+# navegador que nadie va a abrir) dejaria la peticion y el hilo pegados.
+EE_TIMEOUT_S = int(os.environ.get("EE_TIMEOUT_S", "600"))
+MODELO_TIMEOUT_S = int(os.environ.get("MODELO_TIMEOUT_S", "600"))
+
+# Los Excel se leen y reescriben completos: dos peticiones a la vez
+# (doble clic, dos pestanas) podrian pisarse. Todo acceso a los archivos de
+# datos toma _LOCK_DATOS (por tiempos cortos). /api/predecir ademas usa su
+# propio candado para rechazar una segunda corrida simultanea en vez de
+# encolarla (cada corrida tarda minutos), sin bloquear al resto de la app.
+_LOCK_DATOS = threading.RLock()
+_LOCK_PREDICCION = threading.Lock()
+
 app = FastAPI(title="SAD - backend")
 
 origenes = ["*"] if CORS_ORIGINS.strip() == "*" else [o.strip() for o in CORS_ORIGINS.split(",")]
@@ -157,6 +173,22 @@ def nombres_de_potreros() -> list[str]:
         if nombre:
             nombres.append(nombre)
     return nombres
+
+
+def guardar_libro_atomico(libro: Workbook, ruta: Path):
+    """Guarda el libro en un archivo temporal y lo renombra encima del
+    definitivo: si el proceso se cae a media escritura, el Excel anterior
+    queda intacto en vez de truncado."""
+    ruta_tmp = ruta.with_name(ruta.name + ".tmp")
+    libro.save(ruta_tmp)
+    os.replace(ruta_tmp, ruta)
+
+
+def escribir_geojson(geojson: dict):
+    GEOJSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ruta_tmp = GEOJSON_PATH.with_name(GEOJSON_PATH.name + ".tmp")
+    ruta_tmp.write_text(json.dumps(geojson, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(ruta_tmp, GEOJSON_PATH)
 
 
 def leer_hoja_como_dicts(ruta: Path, nombre_hoja: str) -> list[dict]:
@@ -310,7 +342,7 @@ def guardar_estado(estado: dict):
         for fila in filas:
             hoja.append(list(fila))
 
-    libro.save(ESTADO_PATH)
+    guardar_libro_atomico(libro, ESTADO_PATH)
 
 
 def leer_aforo() -> list[dict]:
@@ -371,7 +403,7 @@ def guardar_aforo(registros: list[dict]):
                 registro["id"],
             ]
         )
-    libro.save(AFORO_PATH)
+    guardar_libro_atomico(libro, AFORO_PATH)
 
 
 def validar_aforo(nombre_potrero: str, fecha: str, h1: float, h2: float, h3: float):
@@ -397,10 +429,15 @@ def agregar_indices_al_historial(ruta_temp: Path, fecha_consulta: str):
     """Copia las filas que acaba de escribir earth-engine/extraer_indices.py
     (un archivo temporal, se sobreescribe cada corrida) al historial
     acumulado que usa el modelo para entrenar (indices_historial.xlsx,
-    que solo crece)."""
+    que solo crece).
+
+    Las columnas se emparejan por NOMBRE, no por posicion (si el script de
+    Earth Engine agrega o reordena columnas, el historial no se desalinea),
+    y una escena ya registrada para un potrero no se vuelve a agregar:
+    consultar dos veces el mismo dia, o con la misma escena disponible,
+    ya no duplica filas."""
     libro_temp = load_workbook(ruta_temp, data_only=True)
-    hoja_temp = libro_temp.active
-    filas = list(hoja_temp.iter_rows(values_only=True))
+    filas = list(libro_temp.active.iter_rows(values_only=True))
     if not filas:
         return
     encabezados = [str(c).strip() if c is not None else "" for c in filas[0]]
@@ -408,18 +445,39 @@ def agregar_indices_al_historial(ruta_temp: Path, fecha_consulta: str):
     if INDICES_HISTORIAL_PATH.exists():
         libro_historial = load_workbook(INDICES_HISTORIAL_PATH)
         hoja_historial = libro_historial.active
+        encabezados_historial = [
+            str(c.value).strip() if c.value is not None else "" for c in hoja_historial[1]
+        ]
+        for encabezado in encabezados + ["fecha_consulta"]:
+            if encabezado not in encabezados_historial:
+                encabezados_historial.append(encabezado)
+                hoja_historial.cell(row=1, column=len(encabezados_historial), value=encabezado)
     else:
         libro_historial = Workbook()
         hoja_historial = libro_historial.active
         hoja_historial.title = "Indices"
-        hoja_historial.append(encabezados + ["fecha_consulta"])
+        encabezados_historial = encabezados + ["fecha_consulta"]
+        hoja_historial.append(encabezados_historial)
+
+    def clave(fila_dict):
+        return (str(fila_dict.get("potrero")), normalizar_fecha(fila_dict.get("fecha_escena_usada")))
+
+    existentes = {
+        clave(dict(zip(encabezados_historial, fila)))
+        for fila in hoja_historial.iter_rows(min_row=2, values_only=True)
+    }
 
     for fila in filas[1:]:
         if all(valor is None for valor in fila):
             continue
-        hoja_historial.append(list(fila) + [fecha_consulta])
+        registro = dict(zip(encabezados, fila))
+        if clave(registro) in existentes:
+            continue
+        existentes.add(clave(registro))
+        registro["fecha_consulta"] = fecha_consulta
+        hoja_historial.append([registro.get(columna) for columna in encabezados_historial])
 
-    libro_historial.save(INDICES_HISTORIAL_PATH)
+    guardar_libro_atomico(libro_historial, INDICES_HISTORIAL_PATH)
     ruta_temp.unlink(missing_ok=True)
 
 
@@ -430,8 +488,8 @@ def ultimas_lineas(texto: str, cantidad: int = 8) -> str:
 
 @app.get("/api/potreros")
 def obtener_potreros():
-    return cargar_estado()
-
+    with _LOCK_DATOS:
+        return cargar_estado()
 
 @app.post("/api/geojson")
 def guardar_geojson(body: GeoJSONIn):
@@ -440,30 +498,34 @@ def guardar_geojson(body: GeoJSONIn):
     sin que el usuario tenga que descargar el archivo y volver a subirlo a
     mano. Reinicia el estado de los potreros a 'sin_datos' porque cambio la
     geometria: los indices satelitales viejos ya no aplican necesariamente."""
-    nombres = [
-        (feature.get("properties") or {}).get("nombre")
-        for feature in body.features
-        if (feature.get("properties") or {}).get("nombre")
-    ]
-    if not nombres:
-        raise HTTPException(400, "El GeoJSON no tiene ningun potrero con nombre. Dibuja y cierra al menos uno.")
+    with _LOCK_DATOS:
+        nombres = []
+        for feature in body.features:
+            nombre = (feature.get("properties") or {}).get("nombre")
+            if not nombre:
+                continue
+            if not feature.get("geometry"):
+                raise HTTPException(400, f"El potrero '{nombre}' no tiene geometria.")
+            if nombre in nombres:
+                raise HTTPException(400, f"Hay mas de un potrero llamado '{nombre}'. Los nombres deben ser unicos.")
+            nombres.append(nombre)
+        if not nombres:
+            raise HTTPException(400, "El GeoJSON no tiene ningun potrero con nombre. Dibuja y cierra al menos uno.")
 
-    GEOJSON_PATH.parent.mkdir(parents=True, exist_ok=True)
-    GEOJSON_PATH.write_text(json.dumps(body.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+        escribir_geojson(body.model_dump())
 
-    finca_actual = cargar_estado().get("finca", FINCA_NOMBRE) if ESTADO_PATH.exists() else FINCA_NOMBRE
-    estado = {
-        "finca": finca_actual,
-        "actualizado": None,
-        "modelo": None,
-        "potreros": [
-            {"nombre": nombre, "estado": "sin_datos", "biomasa_kg_ha": None, "fecha": None, "fuente_prediccion": None}
-            for nombre in nombres
-        ],
-    }
-    guardar_estado(estado)
-    return estado
-
+        finca_actual = cargar_estado().get("finca", FINCA_NOMBRE) if ESTADO_PATH.exists() else FINCA_NOMBRE
+        estado = {
+            "finca": finca_actual,
+            "actualizado": None,
+            "modelo": None,
+            "potreros": [
+                {"nombre": nombre, "estado": "sin_datos", "biomasa_kg_ha": None, "fecha": None, "fuente_prediccion": None}
+                for nombre in nombres
+            ],
+        }
+        guardar_estado(estado)
+        return estado
 
 @app.delete("/api/potreros/{nombre}")
 def eliminar_potrero(nombre: str):
@@ -473,85 +535,94 @@ def eliminar_potrero(nombre: str):
     'Estadisticas'). El aforo y los indices historicos de ese potrero NO se
     borran -- son datos de campo reales, quedan como historial aunque el
     potrero ya no exista."""
-    geojson = cargar_geojson()
-    features_restantes = [
-        f for f in geojson.get("features", []) if (f.get("properties") or {}).get("nombre") != nombre
-    ]
-    if len(features_restantes) == len(geojson.get("features", [])):
-        raise HTTPException(404, f"No existe un potrero llamado '{nombre}' en el GeoJSON de la finca.")
+    with _LOCK_DATOS:
+        geojson = cargar_geojson()
+        features_restantes = [
+            f for f in geojson.get("features", []) if (f.get("properties") or {}).get("nombre") != nombre
+        ]
+        if len(features_restantes) == len(geojson.get("features", [])):
+            raise HTTPException(404, f"No existe un potrero llamado '{nombre}' en el GeoJSON de la finca.")
 
-    geojson["features"] = features_restantes
-    GEOJSON_PATH.write_text(json.dumps(geojson, ensure_ascii=False, indent=2), encoding="utf-8")
+        geojson["features"] = features_restantes
+        escribir_geojson(geojson)
 
-    estado = cargar_estado()
-    estado["potreros"] = [p for p in estado["potreros"] if p["nombre"] != nombre]
-    guardar_estado(estado)
-    return cargar_estado()
-
+        estado = cargar_estado()
+        estado["potreros"] = [p for p in estado["potreros"] if p["nombre"] != nombre]
+        guardar_estado(estado)
+        return cargar_estado()
 
 @app.post("/api/potreros/{nombre}/aforo")
 def registrar_aforo(nombre: str, body: AforoIn):
-    fecha = body.fecha or date.today().isoformat()
-    validar_aforo(nombre, fecha, body.altura_cm_1, body.altura_cm_2, body.altura_cm_3)
+    with _LOCK_DATOS:
+        fecha = body.fecha or date.today().isoformat()
+        validar_aforo(nombre, fecha, body.altura_cm_1, body.altura_cm_2, body.altura_cm_3)
 
-    registros = leer_aforo()
-    registros.append(
-        {
-            "id": uuid.uuid4().hex,
-            "potrero": nombre,
-            "fecha": fecha,
-            "altura_cm_1": body.altura_cm_1,
-            "altura_cm_2": body.altura_cm_2,
-            "altura_cm_3": body.altura_cm_3,
-        }
-    )
-    guardar_aforo(registros)
+        registros = leer_aforo()
+        registros.append(
+            {
+                "id": uuid.uuid4().hex,
+                "potrero": nombre,
+                "fecha": fecha,
+                "altura_cm_1": body.altura_cm_1,
+                "altura_cm_2": body.altura_cm_2,
+                "altura_cm_3": body.altura_cm_3,
+            }
+        )
+        guardar_aforo(registros)
 
-    return {"mensaje": f"Medicion guardada para '{nombre}' el {fecha}.", "potrero": nombre, "fecha": fecha}
-
+        return {"mensaje": f"Medicion guardada para '{nombre}' el {fecha}.", "potrero": nombre, "fecha": fecha}
 
 @app.get("/api/aforo")
 def listar_aforo():
     """Historial completo de mediciones de campo, mas recientes primero --
     lo consume la pestana 'Registrar medicion' para mostrar/editar/borrar."""
-    registros = leer_aforo()
-    registros.sort(key=lambda r: (r["fecha"] or "", r["potrero"] or ""), reverse=True)
-    return {"aforo": registros}
-
+    with _LOCK_DATOS:
+        registros = leer_aforo()
+        registros.sort(key=lambda r: (r["fecha"] or "", r["potrero"] or ""), reverse=True)
+        return {"aforo": registros}
 
 @app.put("/api/aforo/{id_registro}")
 def editar_aforo(id_registro: str, body: AforoUpdate):
-    validar_aforo(body.potrero, body.fecha, body.altura_cm_1, body.altura_cm_2, body.altura_cm_3)
+    with _LOCK_DATOS:
+        validar_aforo(body.potrero, body.fecha, body.altura_cm_1, body.altura_cm_2, body.altura_cm_3)
 
-    registros = leer_aforo()
-    for registro in registros:
-        if registro["id"] == id_registro:
-            registro.update(
-                potrero=body.potrero,
-                fecha=body.fecha,
-                altura_cm_1=body.altura_cm_1,
-                altura_cm_2=body.altura_cm_2,
-                altura_cm_3=body.altura_cm_3,
-            )
-            guardar_aforo(registros)
-            return {"mensaje": "Medicion actualizada.", "aforo": registro}
+        registros = leer_aforo()
+        for registro in registros:
+            if registro["id"] == id_registro:
+                registro.update(
+                    potrero=body.potrero,
+                    fecha=body.fecha,
+                    altura_cm_1=body.altura_cm_1,
+                    altura_cm_2=body.altura_cm_2,
+                    altura_cm_3=body.altura_cm_3,
+                )
+                guardar_aforo(registros)
+                return {"mensaje": "Medicion actualizada.", "aforo": registro}
 
-    raise HTTPException(404, f"No existe ninguna medicion con id '{id_registro}'.")
-
+        raise HTTPException(404, f"No existe ninguna medicion con id '{id_registro}'.")
 
 @app.delete("/api/aforo/{id_registro}")
 def borrar_aforo(id_registro: str):
-    registros = leer_aforo()
-    restantes = [r for r in registros if r["id"] != id_registro]
-    if len(restantes) == len(registros):
-        raise HTTPException(404, f"No existe ninguna medicion con id '{id_registro}'.")
+    with _LOCK_DATOS:
+        registros = leer_aforo()
+        restantes = [r for r in registros if r["id"] != id_registro]
+        if len(restantes) == len(registros):
+            raise HTTPException(404, f"No existe ninguna medicion con id '{id_registro}'.")
 
-    guardar_aforo(restantes)
-    return {"mensaje": "Medicion borrada."}
-
+        guardar_aforo(restantes)
+        return {"mensaje": "Medicion borrada."}
 
 @app.post("/api/predecir")
 def predecir():
+    if not _LOCK_PREDICCION.acquire(blocking=False):
+        raise HTTPException(409, "Ya hay una actualizacion en curso. Espera a que termine e intenta de nuevo.")
+    try:
+        return _predecir()
+    finally:
+        _LOCK_PREDICCION.release()
+
+
+def _predecir():
     if not GEOJSON_PATH.exists():
         raise HTTPException(
             400,
@@ -573,7 +644,8 @@ def predecir():
     # Asegura que potreros_estado.xlsx ya exista con el nombre de la finca
     # (FINCA_NOMBRE) ANTES de invocar el modelo, para que este lo herede
     # en vez de caer en su propio valor por defecto generico.
-    cargar_estado()
+    with _LOCK_DATOS:
+        cargar_estado()
 
     try:
         resultado_indices = subprocess.run(
@@ -590,7 +662,11 @@ def predecir():
             capture_output=True,
             text=True,
             cwd=str(EARTH_ENGINE_SCRIPT.parent),
+            stdin=subprocess.DEVNULL,
+            timeout=EE_TIMEOUT_S,
         )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, f"Earth Engine no respondio en {EE_TIMEOUT_S} segundos. Intenta de nuevo mas tarde.")
     except OSError as error:
         raise HTTPException(500, f"No se pudo ejecutar el script de Earth Engine: {error}")
 
@@ -598,7 +674,8 @@ def predecir():
         detalle = ultimas_lineas(resultado_indices.stdout + "\n" + resultado_indices.stderr)
         raise HTTPException(502, f"No se pudieron obtener los indices satelitales:\n{detalle}")
 
-    agregar_indices_al_historial(INDICES_TEMP_PATH, fecha_hoy)
+    with _LOCK_DATOS:
+        agregar_indices_al_historial(INDICES_TEMP_PATH, fecha_hoy)
 
     if not MODELO_SCRIPT.exists():
         raise HTTPException(
@@ -608,13 +685,20 @@ def predecir():
             f"Los indices satelitales de hoy si se calcularon correctamente y quedaron en '{INDICES_HISTORIAL_PATH}'.",
         )
 
+    # El modelo reescribe el Excel de estado por completo. Para que "Mis
+    # potreros" nunca lea un archivo a medio escribir mientras tanto, trabaja
+    # sobre una copia y solo al terminar bien se reemplaza el real.
+    estado_tmp = ESTADO_PATH.with_name(ESTADO_PATH.stem + "_nuevo.xlsx")
+    with _LOCK_DATOS:
+        shutil.copyfile(ESTADO_PATH, estado_tmp)
+
     argumentos_modelo = [
         sys.executable,
         str(MODELO_SCRIPT),
         "--geojson", str(GEOJSON_PATH),
         "--indices", str(INDICES_HISTORIAL_PATH),
         "--aforo", str(AFORO_PATH),
-        "--salida", str(ESTADO_PATH),
+        "--salida", str(estado_tmp),
         "--modelo-guardado", str(MODELO_JOBLIB_PATH),
         "--umbral-rojo", str(UMBRAL_ROJO),
         "--umbral-ambar", str(UMBRAL_AMBAR),
@@ -637,12 +721,21 @@ def predecir():
             capture_output=True,
             text=True,
             cwd=str(MODELO_SCRIPT.parent),
+            stdin=subprocess.DEVNULL,
+            timeout=MODELO_TIMEOUT_S,
         )
+    except subprocess.TimeoutExpired:
+        estado_tmp.unlink(missing_ok=True)
+        raise HTTPException(504, f"El modelo no termino en {MODELO_TIMEOUT_S} segundos.")
     except OSError as error:
+        estado_tmp.unlink(missing_ok=True)
         raise HTTPException(500, f"No se pudo ejecutar el modelo de prediccion: {error}")
 
     if resultado_modelo.returncode != 0:
+        estado_tmp.unlink(missing_ok=True)
         detalle = ultimas_lineas(resultado_modelo.stdout + "\n" + resultado_modelo.stderr)
         raise HTTPException(502, f"No se pudo generar la prediccion de biomasa:\n{detalle}")
 
-    return cargar_estado()
+    with _LOCK_DATOS:
+        os.replace(estado_tmp, ESTADO_PATH)
+        return cargar_estado()

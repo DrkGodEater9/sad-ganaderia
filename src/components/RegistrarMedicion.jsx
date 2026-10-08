@@ -6,11 +6,7 @@ import {
   editarAforo,
   borrarAforo,
 } from "../utils/api.js";
-import { formatearFecha } from "../utils/formato.js";
-
-function hoyISO() {
-  return new Date().toISOString().slice(0, 10);
-}
+import { formatearFecha, hoyISO } from "../utils/formato.js";
 
 export default function RegistrarMedicion() {
   const [potreros, setPotreros] = useState([]);

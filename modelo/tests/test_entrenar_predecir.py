@@ -192,3 +192,21 @@ def test_entrenar_modelo_con_datos_suficientes_elige_un_ganador():
     pesos = [fila["importancia"] for fila in paquete["importancias"]]
     assert pesos == sorted(pesos, reverse=True)
     assert sum(pesos) == pytest.approx(1.0, rel=1e-3)
+
+
+def test_contenido_del_aforo_detecta_una_medicion_editada():
+    base = pd.DataFrame(
+        {
+            "potrero": ["P1", "P2"],
+            "fecha_aforo": [pd.Timestamp("2026-09-01").date(), pd.Timestamp("2026-09-02").date()],
+            "biomasa_kg_ms_ha": [300.0, 400.0],
+        }
+    )
+    editado = base.copy()
+    editado.loc[0, "biomasa_kg_ms_ha"] = 350.0
+
+    h = ep.contenido_del_aforo(base, 50.0, 15.0, 15)
+    assert h == ep.contenido_del_aforo(base.iloc[::-1].reset_index(drop=True), 50.0, 15.0, 15)  # orden no importa
+    assert h != ep.contenido_del_aforo(editado, 50.0, 15.0, 15)  # misma cantidad y fechas, otra altura
+    assert h != ep.contenido_del_aforo(base, 60.0, 15.0, 15)  # otra calibracion
+    assert h != ep.contenido_del_aforo(base, 50.0, 15.0, 30)  # otra ventana

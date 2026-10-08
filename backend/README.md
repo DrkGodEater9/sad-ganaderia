@@ -262,3 +262,14 @@ No necesitan credenciales de Earth Engine ni conexion a internet: usan
 un GeoJSON y una carpeta de datos temporales por prueba (nunca tocan
 `backend/data/` real), y prueban la validacion de `POST /api/predecir`
 solo hasta donde no hace falta invocar Earth Engine de verdad.
+
+## Robustez y pruebas
+
+- `EE_TIMEOUT_S` / `MODELO_TIMEOUT_S` (default `600`): segundos maximos de
+  espera a Earth Engine y al modelo; pasado ese tiempo `POST /api/predecir`
+  responde `504` en vez de quedarse colgado.
+- Solo corre una actualizacion a la vez: una segunda llamada a
+  `POST /api/predecir` mientras hay otra en curso responde `409`.
+- Los Excel y el GeoJSON se guardan de forma atomica (archivo temporal +
+  renombrado), y `indices_historial.xlsx` no duplica una escena ya registrada.
+- Pruebas: `pip install -r requirements-dev.txt && python -m pytest`.
